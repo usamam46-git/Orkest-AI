@@ -15,6 +15,10 @@ alias dc='docker compose -f docker-compose.prod.yml --env-file .env.prod'
 
 ## 0. Prerequisites
 
+> **Deploying on AWS EC2?** Do [`DEPLOY-AWS.md`](DEPLOY-AWS.md) first. It
+> provisions the instance and applies the 4 GB sizing overrides, then returns
+> here at step 1 — with one change to the `dc` alias above.
+
 - A VPS. Vol. 6 §4's sizing for 0–1,000 users is 8 vCPU / 32 GB / NVMe. The
   stack will run on far less; Postgres + pgvector and the three Celery pools are
   what consume it, not the proxy.
@@ -23,8 +27,12 @@ alias dc='docker compose -f docker-compose.prod.yml --env-file .env.prod'
   fails if DNS is not live yet.
 - Docker Engine + the Compose plugin.
 - A firewall allowing **only 22, 80 and 443**. Nothing else needs to be
-  reachable — the compose file publishes no other port, but a firewall is the
-  layer that survives someone adding one later.
+  reachable — the compose file publishes no other port. **ufw does not cover
+  ports Docker publishes**: Docker's firewall rules take effect before ufw's, so
+  a port added to the compose file later is reachable whatever `ufw status`
+  says. The layer that survives that mistake is a firewall *outside* the host —
+  your provider's security group or cloud firewall. ufw still guards anything
+  listening on the host itself.
 
   ```sh
   ufw default deny incoming && ufw allow 22 && ufw allow 80 && ufw allow 443 && ufw enable

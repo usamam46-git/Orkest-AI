@@ -1,0 +1,163 @@
+# infra/docker-compose.aws.yml — sizing overrides for a 4 GB AWS EC2 box.
+#
+#   docker compose -f docker-compose.prod.yml -f docker-compose.aws.yml \
+#     --env-file .env.prod up -d --build
+#
+# See infra/DEPLOY-AWS.md for how the instance gets provisioned in the first
+# place; that document hands off to infra/DEPLOY.md step 1, which is unchanged
+# by this file apart from the `dc` alias gaining a second -f.
+#
+# THIS FILE IS AN OVERRIDE AND IS MEANINGLESS ALONE. `docker compose -f
+# docker-compose.aws.yml config` describes a stack with no images, no networks
+# and no environment. It must always follow docker-compose.prod.yml.
+#
+# ─── WHY IT EXISTS ───────────────────────────────────────────────────────────
+#
+# Vol. 6 §4 sizes the single-VPS deployment at 8 vCPU / 32 GB, and
+# docker-compose.prod.yml is written to that: 16 Celery child processes
+# (-c 4 + -c 8 + -c 4) plus three parents, which is roughly 4 GB of Python
+# before Postgres, MinIO or Next.js get any.
+#
+# The target here is a t4g.medium — 2 vCPU Graviton, 4 GB — because this is a
+# portfolio/learning deployment funded by AWS credits, and 4 GB is what buys a
+# runway long enough to matter. That is a DELIBERATE deviation from the
+# blueprint's sizing, and it is the only deviation: nothing below adds,
+# removes, renames or rewires a service. The topology, the `internal: true`
+# network guarantees, the secret handling and the one-shot `migrate` ordering
+# all come from docker-compose.prod.yml untouched.
+#
+# In particular the three worker containers STAY three containers. Collapsing
+# them into one `-Q a,b,c` worker would save ~800 MB, and it is the obvious
+# move on a small box — but the queue topology is the thing this deployment
+# exists to demonstrate, so the concurrency goes to 1 and the containers stay.
+#
+# ─── WHAT YOU CANNOT DO IN THIS FILE ─────────────────────────────────────────
+#
+# YAML anchors do not cross files. `*api-env`, `*api-image` and `*app-depends`
+# are defined in docker-compose.prod.yml and are NOT in scope here. Every
+# service below therefore sets individual keys only (command, mem_limit,
+# oom_score_adj); everything else — image, build, environment, depends_on,
+# healthcheck, networks — merges in from the base file. Do not try to restate
+# `environment:` here: for a map, Compose MERGES rather than replaces, but the
+# secrets are already correct in the base and duplicating them is how they
+# drift.
+#
+# ─── ON mem_limit ────────────────────────────────────────────────────────────
+#
+# The limits below deliberately sum to more than 4 GB. They are not
+# reservations and are not a budget. Their whole purpose is that when the box
+# is squeezed, ONE container is killed predictably by its own limit, instead of
+# the kernel's OOM killer picking a victim by heuristic — which, on a machine
+# where Postgres has the largest resident set, means Postgres.
+#
+# oom_score_adj is the second half of that: it biases the kernel away from the
+# datastores if the global OOM killer runs anyway.
+#
+# A container that keeps dying is diagnosed with:
+#   docker inspect -f '{{.State.OOMKilled}}' <container>
+#   dmesg -T | grep -i 'killed process'
+
+services:
+
+  # ─── PostgreSQL — tuned for 4 GB ──────────────────────────────────────────
+  # The base file sets no `command:`, so this is the image's entrypoint with
+  # explicit settings rather than an override of anything.
+  #
+  # max_connections is RAISED, from the default 100 to 120, which is the
+  # opposite of the instinct on a small box. apps/api/src/db/database.py sets
+  # pool_size=10 with max_overflow=20 — thirty connections per PROCESS — and
+  # every Celery child builds its own engine. api + worker_workflow +
+  # worker_documents + worker_notifications is four DB-using processes at -c 1,
+  # so the application's own ceiling is 120. Trimming max_connections to "save
+  # memory" buys a few MB of idle backends and pays for it with
+  # "FATAL: sorry, too many clients already" under exactly the burst a demo
+  # produces. Idle backends are cheap; a refused connection is not.
+  #
+  # work_mem is the one that must stay small, because it is allocated per sort
+  # per connection — 4 MB × 120 is already the number that matters here, not
+  # shared_buffers.
+  postgres:
+    command:
+      - postgres
+      - -c
+      - max_connections=120
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=768MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=64MB
+    mem_limit: 512m
+    # Most negative of anything in the stack: losing the database loses the
+    # deployment, and everything else here restarts clean.
+    oom_score_adj: -700
+
+  # ─── Redis — bounded, and explicitly NOT an LRU cache ─────────────────────
+  # noeviction is load-bearing, not a default worth inheriting by accident.
+  # This Redis is the Celery BROKER (db 1) as well as the app's cache (db 0).
+  # Under any allkeys-* policy, reaching maxmemory silently discards queued
+  # tasks — runs sit at `pending` forever and nothing anywhere logs an error.
+  # With noeviction the publish fails loudly instead, which is the failure you
+  # can actually debug.
+  #
+  # The image's compiled-in save points are preserved by not passing --save:
+  # a broker that loses its queue on restart is a worse trade than the fork.
+  redis:
+    command: redis-server --maxmemory 128mb --maxmemory-policy noeviction
+    mem_limit: 192m
+    oom_score_adj: -500
+
+  # ─── MinIO ────────────────────────────────────────────────────────────────
+  # Uploads stream to disk; the resident set is metadata, not object bodies.
+  minio:
+    mem_limit: 384m
+
+  # ─── FastAPI backend ──────────────────────────────────────────────────────
+  api:
+    mem_limit: 768m
+
+  # ─── Next.js frontend ─────────────────────────────────────────────────────
+  # Steady-state only. The BUILD is the memory spike on this box and it does
+  # not happen here — see DEPLOY-AWS.md §6 on running `dc build` with the
+  # stack down, and on the 4 GB swapfile that exists for this one step.
+  web:
+    mem_limit: 320m
+
+  # ─── Celery workers — one child each ──────────────────────────────────────
+  # -c 4 → -c 1. --prefetch-multiplier is carried over verbatim from the base
+  # file: with one child it is nearly moot, but restating it keeps a diff
+  # against docker-compose.prod.yml readable as "concurrency changed, nothing
+  # else did".
+  worker_workflow:
+    command: celery -A src.workers.celery_app worker -Q workflow_execution -c 1 --prefetch-multiplier 1 -l info
+    mem_limit: 512m
+
+  # -c 8 → -c 1, and the largest limit of the three. Ingestion holds a decoded
+  # PDF plus a batch of embedding vectors at once (see workers/document_tasks.py),
+  # which is a real working set rather than a mostly-idle import of langchain.
+  # If this is the container that gets OOM-killed, lower
+  # --prefetch-multiplier to 1 before raising the limit.
+  worker_documents:
+    command: celery -A src.workers.celery_app worker -Q document_processing -c 1 --prefetch-multiplier 2 -l info
+    mem_limit: 640m
+
+  # -c 4 → -c 1. Smallest footprint of the three: an httpx POST and a row update.
+  worker_notifications:
+    command: celery -A src.workers.celery_app worker -Q notifications -c 1 -l info
+    mem_limit: 384m
+
+  # ─── Celery Beat ──────────────────────────────────────────────────────────
+  # The tick is one small publish, but that is not what sets beat's footprint.
+  # `celery beat` runs the loader's worker-init, which imports celery_app's
+  # `include` list — and workers/graph_tasks.py imports langgraph, the LLM
+  # client and the graph compiler at module scope. Beat's resident set is
+  # therefore close to a worker parent's, not a cron daemon's. 256m looks
+  # generous for what beat does and is tight for what it loads.
+  beat:
+    mem_limit: 384m
+
+  # ─── nginx ────────────────────────────────────────────────────────────────
+  nginx:
+    mem_limit: 96m
