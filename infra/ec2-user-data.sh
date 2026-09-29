@@ -34,7 +34,7 @@ export DEBIAN_FRONTEND=noninteractive
 # it, and discovering that at step 2 means discovering it with a half-configured
 # box.
 apt-get update
-apt-get install -y ca-certificates curl git gnupg ufw gettext-base unattended-upgrades
+apt-get install -y ca-certificates curl git gnupg ufw gettext-base unattended-upgrades unzip
 
 # ─── 2. Docker Engine + Compose v2, from Docker's own repository ─────────────
 # Not Ubuntu's `docker.io`: that package tracks its own release cadence and
@@ -55,6 +55,17 @@ systemctl enable --now docker
 # The default login user on Ubuntu AMIs. Takes effect at the next login, which
 # is the first SSH — user-data finishes before anyone can connect.
 usermod -aG docker ubuntu
+
+# ─── 2b. AWS CLI v2 ──────────────────────────────────────────────────────────
+# For infra/backup.sh (nightly pg_dump to S3). Not in Ubuntu's apt archive for
+# 24.04, so from AWS's own installer — the aarch64 build, this is a Graviton box.
+# Credentials come from the instance's IAM role; nothing is configured here.
+if ! command -v aws >/dev/null 2>&1; then
+  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o /tmp/awscliv2.zip
+  unzip -q /tmp/awscliv2.zip -d /tmp
+  /tmp/aws/install
+  rm -rf /tmp/aws /tmp/awscliv2.zip
+fi
 
 # ─── 3. Swap ─────────────────────────────────────────────────────────────────
 # 4 GB of swap on a 4 GB box. The steady-state stack fits in RAM with

@@ -25,9 +25,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import src.db.models  # noqa: F401 — register full ORM graph at startup
 from src.core.config import settings
+from src.core.observability import init_sentry
 from src.core.redis import close_redis, init_redis
 
 logger = logging.getLogger(__name__)
+
+init_sentry("api")
 
 
 # ---------------------------------------------------------------------------

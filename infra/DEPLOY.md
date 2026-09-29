@@ -128,6 +128,14 @@ Browsers will show a certificate warning at this point. That is the dummy.
 
 ## 5. Issue the real certificate
 
+`--env-file` feeds Compose only, not your shell, so `$DOMAIN` (exported in step 2) and
+`$ACME_EMAIL` are empty here unless you load them. An empty `--email` makes certbot
+error or prompt:
+
+```sh
+set -a; . ./.env.prod; set +a
+```
+
 Discard the placeholder first, or certbot treats it as an existing lineage:
 
 ```sh
@@ -198,7 +206,12 @@ Then, in a browser:
    → `completed`. This exercises beat, `worker_workflow`, and proves nginx did
    not alter the raw request body the HMAC is computed over.
 
-7. **CSP.** It ships as `Content-Security-Policy-Report-Only`. Load the landing
+7. **Backup + restore, once.** A backup that has never been restored is a guess.
+   Follow `DEPLOY-AWS.md` §10: run `./backup.sh`, confirm the object appears in S3,
+   then restore it into a scratch database and check a table has rows. Do this
+   before storing any real credential.
+
+8. **CSP.** It ships as `Content-Security-Policy-Report-Only`. Load the landing
    page and the builder, read the console violations, and only then consider
    renaming the header to `Content-Security-Policy`. The landing page uses
    WebGL and GSAP-injected inline styles; an enforced policy written blind
@@ -220,9 +233,8 @@ reload because the config resolves upstreams through a variable rather than an
 
 ## Not set up here
 
-- **Backups are a manual `pg_dump` above.** A production database holding
-  encrypted customer credentials with no scheduled off-host backup is the
-  largest remaining gap; it is the next thing to do after this stack is up.
+- **Scheduled off-host backups** exist as `infra/backup.sh`; the S3/IAM/cron setup
+  is `DEPLOY-AWS.md` §10. The manual `pg_dump` above is for one-off copies.
 - CI/CD (Vol. 6 §3) — deploy is `git pull && dc up -d --build` for now.
 - API replicas (Vol. 6 §4). The one-shot `migrate` service is the precondition;
   add an `upstream` with two api instances once one is proven stable.

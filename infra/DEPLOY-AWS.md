@@ -279,13 +279,13 @@ dc ps     # all healthy; migrate shows Exited (0), which is correct
 
 Listed so the next reader knows these were considered, not missed:
 
-- **Backups** are still the manual `pg_dump` from `DEPLOY.md` §7. This is a demo
-  box, but it holds `INTEGRATION_ENCRYPTION_KEY` and whatever credentials were
-  stored under it; a terminated instance takes both. The cheap next step is a
-  nightly `pg_dump` to S3 under a lifecycle rule.
-- **S3 instead of MinIO.** `core/storage.py` already speaks boto3, so this is a
-  configuration change plus an IAM instance role — cheap, and the natural first
-  AWS-native service to adopt.
+- **Backups** are set up in §10 below.
+- **S3 instead of MinIO.** Not the configuration-only change it sounds like.
+  `core/storage.py` builds its client from static `MINIO_ACCESS_KEY` /
+  `MINIO_SECRET_KEY` and always passes `endpoint_url`, so an IAM instance role
+  would need a code change (make both optional and omit `endpoint_url` for AWS).
+  MinIO on the box is fine at this scale; this is the natural first AWS-native
+  swap if it stops being fine.
 - **RDS / ElastiCache.** ~$25/mo more between them, which roughly halves the
   credit runway, and it gives up the self-contained pgvector-in-Compose story.
   Not worth it at this scale.
@@ -294,3 +294,48 @@ Listed so the next reader knows these were considered, not missed:
   vertical first), not a shortcut.
 - **Scheduled stop/start.** See §1 on why stopping may not save anything that
   matters.
+
+## 10. Backups
+
+`backup.sh` dumps Postgres, verifies the gzip and a minimum size, uploads to S3,
+and exits non-zero on any failure. It needs the AWS CLI (installed by
+`ec2-user-data.sh`; on an instance launched before that change run the three
+`curl`/`unzip`/`install` lines from its §2b by hand).
+
+**S3 bucket.** Private, default encryption on, public access blocked. Add a
+lifecycle rule expiring objects after 30 days, otherwise nightly dumps grow
+forever.
+
+**IAM role.** Create a role for EC2 with only:
+
+```json
+{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject",
+ "Resource":"arn:aws:s3:::YOUR-BUCKET/db/*"}]}
+```
+
+Attach it: EC2 → instance → Actions → Security → *Modify IAM role*. Put-only is
+deliberate: a compromised box can add backups but not read or delete them.
+
+**Configure.** In `.env.prod` set `BACKUP_S3_URI=s3://YOUR-BUCKET/db/`. Optionally
+create a check at healthchecks.io and set `BACKUP_PING_URL` — cron fails
+silently, and this is what turns "the backup stopped" into an email.
+
+**Test once by hand, then schedule:**
+
+```sh
+./backup.sh        # then confirm the object in the S3 console (the put-only role cannot list)
+echo '17 3 * * * ubuntu /home/ubuntu/AI-Automation/infra/backup.sh >> /var/log/orkest-backup.log 2>&1' \
+  | sudo tee /etc/cron.d/orkest-backup
+sudo touch /var/log/orkest-backup.log && sudo chown ubuntu /var/log/orkest-backup.log
+```
+
+**Restore** into an empty database (test this once before you need it):
+
+```sh
+gunzip -c orkest-aap_db-<stamp>.sql.gz | dc exec -T postgres psql -U "$POSTGRES_USER" "$POSTGRES_DB"
+```
+
+**Store `INTEGRATION_ENCRYPTION_KEY` outside this bucket** (a password manager).
+The dump holds credentials encrypted under it; without the key a restore brings
+back rows nobody can decrypt. MinIO's original uploaded files are not backed up —
+their chunks are in the dump, and documents can be re-uploaded.

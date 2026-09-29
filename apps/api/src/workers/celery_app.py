@@ -22,6 +22,9 @@ from celery import Celery
 
 import src.db.all_models  # noqa: F401 — registers every ORM mapper; see module docstring
 from src.core.config import settings
+from src.core.observability import init_sentry
+
+init_sentry("worker")
 
 celery_app = Celery(
     "aap_workers",
