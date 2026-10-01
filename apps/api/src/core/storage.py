@@ -1,5 +1,5 @@
 """
-core/storage.py — object storage for knowledge-base documents (MinIO / S3).
+core/storage.py — object storage for knowledge-base documents (MinIO locally, AWS S3 in production).
 
 Lives in `core/` rather than in `modules/knowledge_base/` for the same reason
 `llm_client.py` and `encryption.py` do: it is an infrastructure client that owns
@@ -59,15 +59,31 @@ def _client() -> Any:
 
     `signature_version="s3v4"` is required: MinIO rejects the older v2 signature,
     and the failure is a 400 with a body that does not mention signatures.
+
+    Two modes, chosen by what is empty (see `core/config.py`): a set
+    `MINIO_ENDPOINT` talks to MinIO with static keys, exactly as before; an empty
+    one talks to AWS S3 and, with empty keys, lets boto3 resolve credentials from
+    its default chain — the EC2 instance role in production.
     """
-    scheme = "https" if settings.MINIO_SECURE else "http"
-    return boto3.client(
-        "s3",
-        endpoint_url=f"{scheme}://{settings.MINIO_ENDPOINT}",
-        aws_access_key_id=settings.MINIO_ACCESS_KEY,
-        aws_secret_access_key=settings.MINIO_SECRET_KEY,
-        config=Config(signature_version="s3v4", retries={"max_attempts": 3, "mode": "standard"}),
-    )
+    kwargs: dict[str, Any] = {
+        "config": Config(signature_version="s3v4", retries={"max_attempts": 3, "mode": "standard"}),
+    }
+    if settings.MINIO_ENDPOINT:
+        scheme = "https" if settings.MINIO_SECURE else "http"
+        kwargs["endpoint_url"] = f"{scheme}://{settings.MINIO_ENDPOINT}"
+    # Both or neither: a lone half-key would pin boto3 to a broken static pair
+    # instead of falling through to the instance role.
+    if settings.MINIO_ACCESS_KEY and settings.MINIO_SECRET_KEY:
+        kwargs["aws_access_key_id"] = settings.MINIO_ACCESS_KEY
+        kwargs["aws_secret_access_key"] = settings.MINIO_SECRET_KEY
+    if settings.AWS_REGION:
+        kwargs["region_name"] = settings.AWS_REGION
+    return boto3.client("s3", **kwargs)
+
+
+def _target() -> str:
+    """Human-readable storage location for error messages."""
+    return settings.MINIO_ENDPOINT or f"AWS S3 ({settings.AWS_REGION or 'default region'})"
 
 
 def safe_file_name(file_name: str) -> str:
@@ -123,10 +139,15 @@ def ensure_bucket_sync() -> None:
         if code not in {"404", "NoSuchBucket", "NoSuchKey"}:
             raise StorageError(f"Could not reach bucket '{settings.MINIO_BUCKET}': {exc}") from exc
     except BotoCoreError as exc:
-        raise StorageError(f"Could not reach object storage at {settings.MINIO_ENDPOINT}: {exc}") from exc
+        raise StorageError(f"Could not reach object storage at {_target()}: {exc}") from exc
 
+    create_kwargs: dict[str, Any] = {"Bucket": settings.MINIO_BUCKET}
+    # S3 rejects a LocationConstraint for us-east-1 and demands one everywhere
+    # else. MinIO (non-empty endpoint) must never be sent one.
+    if not settings.MINIO_ENDPOINT and settings.AWS_REGION and settings.AWS_REGION != "us-east-1":
+        create_kwargs["CreateBucketConfiguration"] = {"LocationConstraint": settings.AWS_REGION}
     try:
-        client.create_bucket(Bucket=settings.MINIO_BUCKET)
+        client.create_bucket(**create_kwargs)
     except ClientError as exc:
         # Two callers racing the same create is normal and not an error.
         if exc.response.get("Error", {}).get("Code") not in {"BucketAlreadyOwnedByYou", "BucketAlreadyExists"}:

@@ -58,10 +58,10 @@ usermod -aG docker ubuntu
 
 # ─── 2b. AWS CLI v2 ──────────────────────────────────────────────────────────
 # For infra/backup.sh (nightly pg_dump to S3). Not in Ubuntu's apt archive for
-# 24.04, so from AWS's own installer — the aarch64 build, this is a Graviton box.
+# 24.04, so from AWS's own installer, picking the build that matches the CPU (x86_64 or aarch64).
 # Credentials come from the instance's IAM role; nothing is configured here.
 if ! command -v aws >/dev/null 2>&1; then
-  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o /tmp/awscliv2.zip
+  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o /tmp/awscliv2.zip
   unzip -q /tmp/awscliv2.zip -d /tmp
   /tmp/aws/install
   rm -rf /tmp/aws /tmp/awscliv2.zip

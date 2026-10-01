@@ -9,8 +9,9 @@
 # THIS IS NOT AN OVERRIDE OF docker-compose.yml. It is a standalone stack, and
 # it differs from the development one in five ways that all matter:
 #
-#   1. No published ports on anything but nginx. Postgres, Redis and MinIO are
+#   1. No published ports on anything but nginx. Postgres and Redis are
 #      unreachable from the internet; in dev they bind straight to the host.
+#      (Object storage is AWS S3 here, with no MinIO container at all.)
 #   2. No ${VAR:-default} anywhere. Secrets use ${VAR:?...} and the stack
 #      refuses to boot until they are set. The dev defaults are committed to
 #      this repository, which makes "encrypted at rest" decorative.
@@ -32,7 +33,7 @@
 # the three services that need no egress: a compromised datastore cannot phone
 # home. Everything that legitimately makes outbound calls is also on `public`.
 #
-#   internal (internal: true) — postgres, redis, minio: no ingress, NO EGRESS.
+#   internal (internal: true) — postgres, redis: no ingress, NO EGRESS.
 #   public   (ordinary bridge) — egress for the app tier; ingress only where a
 #                                service publishes a port, which is nginx alone.
 
@@ -54,13 +55,16 @@ x-api-env: &api-env
   DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:?set POSTGRES_USER in .env.prod}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.prod}@postgres:5432/${POSTGRES_DB:?set POSTGRES_DB in .env.prod}
   REDIS_URL: redis://redis:6379/0
   CELERY_BROKER_URL: redis://redis:6379/1
-  MINIO_ENDPOINT: minio:9000
-  MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?set MINIO_ACCESS_KEY in .env.prod}
-  MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?set MINIO_SECRET_KEY in .env.prod}
-  # Plain HTTP to MinIO is correct here: the hop never leaves the `internal`
-  # network, which has no route off this host. TLS would be terminating a
-  # connection that cannot be observed.
-  MINIO_SECURE: "false"
+  # Object storage is AWS S3, not MinIO: MinIO stopped publishing images, so
+  # production uses the real thing. An EMPTY endpoint and EMPTY keys are what
+  # select S3 + the instance's IAM role (core/storage.py, core/config.py) — there
+  # is deliberately no storage secret on this host. The local dev compose is
+  # unchanged and still runs MinIO.
+  MINIO_ENDPOINT: ""
+  MINIO_ACCESS_KEY: ""
+  MINIO_SECRET_KEY: ""
+  MINIO_BUCKET: ${S3_DOCUMENTS_BUCKET:?set S3_DOCUMENTS_BUCKET in .env.prod}
+  AWS_REGION: ${AWS_REGION:?set AWS_REGION in .env.prod}
   SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env.prod}
   JWT_SECRET_KEY: ${JWT_SECRET_KEY:?set JWT_SECRET_KEY in .env.prod}
   INTEGRATION_ENCRYPTION_KEY: ${INTEGRATION_ENCRYPTION_KEY:?set INTEGRATION_ENCRYPTION_KEY in .env.prod — rotating it later destroys every stored credential}
@@ -120,27 +124,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    networks: [internal]
-
-  # ─── MinIO (S3-compatible object storage) ─────────────────────────────────
-  # No console port is published. Reach it with `docker compose exec` or an SSH
-  # tunnel; a publicly exposed object-store console is not worth the convenience.
-  # The bucket is created on demand by core/storage.py — no bootstrap job.
-  minio:
-    image: minio/minio:latest
-    restart: unless-stopped
-    logging: *default-logging
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?set MINIO_ACCESS_KEY in .env.prod}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?set MINIO_SECRET_KEY in .env.prod}
-    volumes:
-      - miniodata:/data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 30s
-      timeout: 20s
-      retries: 3
     networks: [internal]
 
   # ─── Schema migration (one-shot, runs to completion then exits) ───────────
@@ -334,4 +317,3 @@ networks:
 volumes:
   pgdata:
   redisdata:
-  miniodata:

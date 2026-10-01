@@ -102,12 +102,22 @@ class Settings(BaseSettings):
 
     # ------------------------------------------------------------------
     # MinIO / S3-compatible object storage
+    #
+    # The MINIO_* names predate the AWS deployment and are kept so nothing local
+    # has to change. Two modes, selected by what is left EMPTY:
+    #   - local / MinIO (the defaults): endpoint + static keys.
+    #   - AWS S3 (production): MINIO_ENDPOINT="" and both keys "" — boto3 then
+    #     uses real S3 and its default credential chain, i.e. the EC2 instance
+    #     role, so no storage secret exists on the box at all.
     # ------------------------------------------------------------------
     MINIO_ENDPOINT: str = Field(default="localhost:9000")
     MINIO_ACCESS_KEY: str = Field(default="minioadmin")
     MINIO_SECRET_KEY: str = Field(default="minioadmin")
     MINIO_BUCKET: str = Field(default="aap-documents")
     MINIO_SECURE: bool = Field(default=False)
+    # Only consulted for AWS S3 (empty endpoint). Needed to create a bucket
+    # outside us-east-1 and to pin the signing region.
+    AWS_REGION: str = Field(default="")
 
     # ------------------------------------------------------------------
     # OpenAI

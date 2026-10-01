@@ -109,11 +109,6 @@ services:
     mem_limit: 192m
     oom_score_adj: -500
 
-  # ─── MinIO ────────────────────────────────────────────────────────────────
-  # Uploads stream to disk; the resident set is metadata, not object bodies.
-  minio:
-    mem_limit: 384m
-
   # ─── FastAPI backend ──────────────────────────────────────────────────────
   api:
     mem_limit: 768m
