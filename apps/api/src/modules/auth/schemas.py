@@ -50,3 +50,9 @@ class RefreshRequest(BaseModel):
 class LogoutRequest(BaseModel):
     # Only if client sends it explicitly. Router will mainly rely on cookie.
     refresh_token: str | None = None
+
+
+class ProvidersResponse(BaseModel):
+    """Which sign-in methods this deployment offers. Drives the login page's buttons."""
+
+    google: bool

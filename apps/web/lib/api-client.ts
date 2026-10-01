@@ -3,6 +3,9 @@ import { useAuthStore } from "@/stores/auth-store";
 
 const baseURL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
 
+/** Exported for the one thing that cannot go through axios: a full-page redirect to /auth/google/login. */
+export const apiBaseUrl = baseURL;
+
 export const apiClient = axios.create({
   baseURL,
   withCredentials: true,

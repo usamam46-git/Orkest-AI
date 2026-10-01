@@ -101,6 +101,24 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
+    # Google sign-in (OAuth 2.0 authorization-code flow, server-side)
+    #
+    # Sign-in with Google is OFF unless BOTH the id and the secret are set; the
+    # login page asks GET /auth/providers and shows the button only when it is on.
+    # GOOGLE_REDIRECT_URI must match, character for character, an "Authorized
+    # redirect URI" on the OAuth client in Google Cloud. In production it is
+    # <FRONTEND_URL>/api/v1/auth/google/callback (one origin, nginx routes it);
+    # locally the API is on :8000, so the default points there.
+    # ------------------------------------------------------------------
+    GOOGLE_CLIENT_ID: str = Field(default="")
+    GOOGLE_CLIENT_SECRET: str = Field(default="")
+    GOOGLE_REDIRECT_URI: str = Field(default="http://localhost:8000/api/v1/auth/google/callback")
+
+    @property
+    def google_enabled(self) -> bool:
+        return bool(self.GOOGLE_CLIENT_ID and self.GOOGLE_CLIENT_SECRET)
+
+    # ------------------------------------------------------------------
     # MinIO / S3-compatible object storage
     #
     # The MINIO_* names predate the AWS deployment and are kept so nothing local

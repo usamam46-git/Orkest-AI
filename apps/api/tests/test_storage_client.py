@@ -12,6 +12,11 @@ import pytest
 from src.core import storage
 from src.core.config import settings
 
+# conftest's autouse `_stub_object_storage` replaces `storage.ensure_bucket_sync` with a
+# no-op for every test. Bind the real function at import time — collection happens
+# before any fixture runs — or the bucket-creation test exercises the stub.
+_real_ensure_bucket_sync = storage.ensure_bucket_sync
+
 
 @pytest.fixture(autouse=True)
 def _fresh_client():
@@ -78,13 +83,13 @@ def test_create_bucket_sends_location_constraint_only_on_aws_outside_us_east_1(m
     monkeypatch.setattr(storage, "_client", lambda: FakeClient())
 
     _set(monkeypatch, MINIO_ENDPOINT="", AWS_REGION="eu-west-1", MINIO_BUCKET="b")
-    storage.ensure_bucket_sync()
+    _real_ensure_bucket_sync()
     assert calls[-1]["CreateBucketConfiguration"] == {"LocationConstraint": "eu-west-1"}
 
     _set(monkeypatch, MINIO_ENDPOINT="", AWS_REGION="us-east-1")
-    storage.ensure_bucket_sync()
+    _real_ensure_bucket_sync()
     assert "CreateBucketConfiguration" not in calls[-1]
 
     _set(monkeypatch, MINIO_ENDPOINT="minio:9000", AWS_REGION="eu-west-1")
-    storage.ensure_bucket_sync()
+    _real_ensure_bucket_sync()
     assert "CreateBucketConfiguration" not in calls[-1]

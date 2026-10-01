@@ -2,17 +2,21 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { authApi } from "@/lib/api";
+import { GoogleSignIn } from "@/components/auth/google-button";
+import { authErrorMessage } from "@/lib/auth-errors";
 import { getApiErrorMessage } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
 
-export default function LoginPage() {
+function LoginForm() {
   const router = useRouter();
+  // Set by the API's Google callback when it sends the browser back here.
+  const redirectError = authErrorMessage(useSearchParams().get("error"));
   const setAccessToken = useAuthStore((state) => state.setAccessToken);
   const [email, setEmail] = React.useState("");
   const [password, setPassword] = React.useState("");
@@ -51,13 +55,24 @@ export default function LoginPage() {
         <h1 className="text-2xl font-semibold tracking-tight text-foreground">Sign in</h1>
         <p className="mt-1.5 text-sm text-muted-foreground">Continue to your workspace.</p>
       </div>
+      <GoogleSignIn />
       <form className="grid gap-4" onSubmit={onSubmit} noValidate>
-        {serverError ? <div className="rounded-xl bg-status-bad-soft px-3.5 py-2.5 text-sm text-status-bad">{serverError}</div> : null}
+        {serverError ?? redirectError ? <div className="rounded-xl bg-status-bad-soft px-3.5 py-2.5 text-sm text-status-bad" role="alert">{serverError ?? redirectError}</div> : null}
         <div className="grid gap-1.5"><Label htmlFor="email">Email</Label><Input id="email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} aria-invalid={Boolean(errors.email)} />{errors.email ? <p className="text-xs text-destructive">{errors.email}</p> : null}</div>
         <div className="grid gap-1.5"><Label htmlFor="password">Password</Label><Input id="password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} aria-invalid={Boolean(errors.password)} />{errors.password ? <p className="text-xs text-destructive">{errors.password}</p> : null}</div>
         <Button className="w-full" disabled={isPending || (submitted && hasErrors)}>{isPending ? <Loader2 className="size-4 animate-spin" /> : null}Login</Button>
         <p className="text-center text-sm text-muted-foreground">No account? <Link className="font-medium text-foreground hover:underline" href="/register">Create one</Link></p>
       </form>
     </div>
+  );
+}
+
+// useSearchParams opts the page out of static rendering unless it sits under a
+// Suspense boundary; without this `next build` fails on /login.
+export default function LoginPage() {
+  return (
+    <React.Suspense fallback={null}>
+      <LoginForm />
+    </React.Suspense>
   );
 }

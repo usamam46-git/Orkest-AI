@@ -269,6 +269,11 @@ export const authApi = {
     const { data } = await apiClient.post<TokenResponse>("/auth/refresh");
     return data;
   },
+  /** Which sign-in methods this deployment offers. Public — the login page calls it signed-out. */
+  async providers() {
+    const { data } = await apiClient.get<{ google: boolean }>("/auth/providers");
+    return data;
+  },
   async logout() {
     await apiClient.post("/auth/logout");
   },

@@ -37,6 +37,16 @@ class User(UUIDMixin, TimestampMixin, Base):
     )
     full_name: Mapped[str] = mapped_column(Text, nullable=False)
     avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    google_sub: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        unique=True,
+        comment=(
+            "Google's stable account id (the `sub` claim). Identity is matched on THIS, "
+            "never on email alone after the first link — a Google address can be "
+            "reassigned or renamed, the sub cannot."
+        ),
+    )
     is_superadmin: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,

@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { authApi } from "@/lib/api";
+import { GoogleSignIn } from "@/components/auth/google-button";
 import { getApiErrorMessage } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
 
@@ -55,6 +56,7 @@ export default function RegisterPage() {
         <h1 className="text-2xl font-semibold tracking-tight text-foreground">Create account</h1>
         <p className="mt-1.5 text-sm text-muted-foreground">Creates your organization and its first workspace.</p>
       </div>
+      <GoogleSignIn label="Sign up with Google" />
       <form className="grid gap-4" onSubmit={onSubmit} noValidate>
         {serverError ? <div className="rounded-xl bg-status-bad-soft px-3.5 py-2.5 text-sm text-status-bad">{serverError}</div> : null}
         <div className="grid gap-1.5"><Label htmlFor="fullName">Name</Label><Input id="fullName" value={fullName} onChange={(event) => setFullName(event.target.value)} aria-invalid={Boolean(errors.fullName)} />{errors.fullName ? <p className="text-xs text-destructive">{errors.fullName}</p> : null}</div>

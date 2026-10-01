@@ -1,3 +1,6 @@
+import hashlib
+import hmac
+import secrets
 import uuid
 
 import redis.asyncio as aioredis
@@ -19,10 +22,25 @@ from src.core.security import (
     hash_refresh_token,
     verify_password,
 )
+from src.modules.auth import google_oauth
 from src.modules.auth.models import OrgMembership, Role, User
 from src.modules.auth.schemas import LoginRequest, RegisterRequest, TokenResponse
 from src.modules.organizations.models import Organization
 from src.modules.workspaces.models import Workspace
+
+GOOGLE_STATE_TTL_SECONDS = 600
+
+
+class GoogleSignInError(Exception):
+    """
+    A Google sign-in that cannot complete. `code` is a short, user-safe slug the
+    router puts in the redirect (`/login?error=<code>`); it never carries Google's
+    response or any detail about why an account was refused.
+    """
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
 
 
 class AuthService:
@@ -83,24 +101,30 @@ class AuthService:
             await self.db.commit()
             return await self._generate_token_response(user.id, org.id)
 
-        # 2. Create Organization
-        # Slugify the org name trivially for now (production would use a proper slugifier)
-        slug = req.organization_name.lower().replace(" ", "-") + "-" + str(uuid.uuid4())[:8]
-        org = Organization(name=req.organization_name, slug=slug)
-        self.db.add(org)
-        await self.db.flush()
-
-        # 3. Create Default Workspace
-        workspace = Workspace(organization_id=org.id, name="Default Workspace", is_default=True)
-        self.db.add(workspace)
-
-        # 4. Create OrgMembership
-        membership = OrgMembership(organization_id=org.id, user_id=user.id, role_id=owner_role_obj.id, status="active")
-        self.db.add(membership)
+        # 2-4. Organization, default workspace and the Owner membership
+        org = await self._provision_org(user.id, req.organization_name, owner_role_obj.id)
         await self.db.commit()
 
         # Generate tokens
         return await self._generate_token_response(user.id, org.id)
+
+    async def _provision_org(self, user_id: uuid.UUID, org_name: str, owner_role_id: uuid.UUID) -> Organization:
+        """
+        Create an organization with its default workspace and make `user_id` its Owner.
+
+        Shared by password registration and first-time Google sign-in so the two
+        cannot drift: a user who arrives either way gets the same org shape. Flushes
+        but does NOT commit — the caller owns the transaction.
+        """
+        # Slugify the org name trivially for now (production would use a proper slugifier)
+        slug = org_name.lower().replace(" ", "-") + "-" + str(uuid.uuid4())[:8]
+        org = Organization(name=org_name, slug=slug)
+        self.db.add(org)
+        await self.db.flush()
+
+        self.db.add(Workspace(organization_id=org.id, name="Default Workspace", is_default=True))
+        self.db.add(OrgMembership(organization_id=org.id, user_id=user_id, role_id=owner_role_id, status="active"))
+        return org
 
     async def login(self, req: LoginRequest) -> TokenResponse:
         """
@@ -151,6 +175,101 @@ class AuthService:
             target_org_id = user.memberships[0].organization_id
 
         return await self._generate_token_response(user.id, target_org_id)
+
+    # ------------------------------------------------------------------
+    # Sign in with Google
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _google_state_key(state: str) -> str:
+        return f"google_oauth:{hashlib.sha256(state.encode()).hexdigest()}"
+
+    async def google_begin(self) -> tuple[str, str]:
+        """
+        Start a sign-in. Returns (consent_url, state).
+
+        The PKCE verifier never leaves the server: it is parked in Redis under a
+        hash of `state` for ten minutes, single use. The browser carries only
+        `state` (in the URL and in a cookie), which is what lets the callback prove
+        that the browser finishing the login is the browser that started it.
+        """
+        state = secrets.token_urlsafe(32)
+        verifier = secrets.token_urlsafe(64)
+        await self.redis.set(self._google_state_key(state), verifier, ex=GOOGLE_STATE_TTL_SECONDS)
+        return google_oauth.build_authorization_url(state, verifier), state
+
+    async def google_complete(self, code: str, state: str, cookie_state: str | None) -> TokenResponse:
+        """
+        Finish a sign-in and return our own token pair. Raises GoogleSignInError.
+
+        Account resolution, in order:
+          1. `google_sub` already known  -> that user.
+          2. verified email matches an existing user -> link the Google identity to
+             that account (the product decision: one person, one account).
+          3. otherwise -> a new user who owns a new organization, like /register.
+        """
+        # Binding: the cookie must equal the state in the URL (login CSRF), and the
+        # state must be one we issued and have not yet spent. GETDEL makes it single
+        # use — a replayed callback finds nothing.
+        if not cookie_state or not hmac.compare_digest(state.encode(), cookie_state.encode()):
+            raise GoogleSignInError("state")
+        verifier = await self.redis.getdel(self._google_state_key(state))
+        if not verifier:
+            raise GoogleSignInError("state")
+
+        try:
+            profile = await google_oauth.fetch_profile(code, verifier)
+        except google_oauth.GoogleOAuthError as exc:
+            raise GoogleSignInError("failed") from exc
+
+        # An unverified address proves nothing about who owns it, and step 2 below
+        # would otherwise let someone claim a victim's account by registering that
+        # address at Google. Refuse before any lookup by email.
+        if not profile.email_verified:
+            raise GoogleSignInError("unverified")
+
+        user = (await self.db.execute(select(User).where(User.google_sub == profile.sub))).scalar_one_or_none()
+
+        if user is None:
+            user = (await self.db.execute(select(User).where(User.email == profile.email))).scalar_one_or_none()
+            if user is not None:
+                if user.google_sub and user.google_sub != profile.sub:
+                    # The address is already tied to a DIFFERENT Google account.
+                    raise GoogleSignInError("conflict")
+                user.google_sub = profile.sub
+                if not user.avatar_url and profile.picture:
+                    user.avatar_url = profile.picture
+            else:
+                owner_role = (await self.db.execute(select(Role).where(Role.is_system.is_(True), Role.name == "Owner"))).scalars().first()
+                if not owner_role:
+                    raise GoogleSignInError("failed")
+                display_name = profile.name or profile.email.split("@")[0]
+                user = User(
+                    email=profile.email,
+                    hashed_password=None,
+                    full_name=display_name,
+                    avatar_url=profile.picture,
+                    google_sub=profile.sub,
+                )
+                self.db.add(user)
+                await self.db.flush()
+                org = await self._provision_org(user.id, f"{display_name}'s organization", owner_role.id)
+                await self.db.commit()
+                return await self._generate_token_response(user.id, org.id)
+
+        membership = (
+            (
+                await self.db.execute(
+                    select(OrgMembership).where(OrgMembership.user_id == user.id, OrgMembership.status == "active").order_by(OrgMembership.created_at)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        await self.db.commit()  # persists a newly linked google_sub / avatar
+        if membership is None:
+            raise GoogleSignInError("no_org")
+        return await self._generate_token_response(user.id, membership.organization_id)
 
     async def switch_org(self, user_id: uuid.UUID, target_org_id_str: str) -> TokenResponse:
         """
