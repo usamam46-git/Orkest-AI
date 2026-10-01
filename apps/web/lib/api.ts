@@ -5,6 +5,18 @@ export type TokenResponse = {
   token_type: string;
 };
 
+/**
+ * What `POST /auth/register` returns. Either a signed-in session, or — when the
+ * deployment requires email verification — a request to enter the emailed code
+ * (`verification_required`, no token). Branch on the flag, never on a missing field.
+ */
+export type RegisterResponse = {
+  access_token?: string | null;
+  token_type: string;
+  verification_required: boolean;
+  email?: string | null;
+};
+
 export type LoginPayload = {
   email: string;
   password: string;
@@ -262,8 +274,17 @@ export const authApi = {
     return data;
   },
   async register(payload: RegisterPayload) {
-    const { data } = await apiClient.post<TokenResponse>("/auth/register", payload);
+    const { data } = await apiClient.post<RegisterResponse>("/auth/register", payload);
     return data;
+  },
+  /** Check the emailed 6-digit code. On success the user is signed in (access token + refresh cookie). */
+  async verifyEmail(payload: { email: string; code: string }) {
+    const { data } = await apiClient.post<TokenResponse>("/auth/verify-email", payload);
+    return data;
+  },
+  /** Always resolves (204), whether or not the address has an account. */
+  async resendVerification(email: string) {
+    await apiClient.post("/auth/resend-verification", { email });
   },
   async refresh() {
     const { data } = await apiClient.post<TokenResponse>("/auth/refresh");

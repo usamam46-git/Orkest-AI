@@ -15,7 +15,10 @@ from src.modules.auth.schemas import (
     LoginRequest,
     ProvidersResponse,
     RegisterRequest,
+    RegisterResponse,
+    ResendVerificationRequest,
     TokenResponse,
+    VerifyEmailRequest,
 )
 from src.modules.auth.service import AuthService, GoogleSignInError
 
@@ -42,7 +45,7 @@ def set_refresh_token_cookie(response: Response, refresh_token: str) -> None:
 
 @router.post(
     "/register",
-    response_model=TokenResponse,
+    response_model=RegisterResponse,
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(RateLimiter(requests=3, window=60))],
 )
@@ -51,10 +54,46 @@ async def register(
     response: Response,
     service: AuthService = Depends(get_auth_service),
 ):
-    """Register a new user, create an organization and default workspace."""
+    """
+    Register a new user, create an organization and default workspace.
+
+    With email verification required this returns `verification_required: true` and
+    NO session: the client must collect the emailed code and call /verify-email.
+    """
     result = await service.register(request)
+    if result.get("verification_required"):
+        return RegisterResponse(verification_required=True, email=result["email"])
+    set_refresh_token_cookie(response, result["refresh_token"])
+    return RegisterResponse(access_token=result["access_token"], token_type=result["token_type"])
+
+
+@router.post(
+    "/verify-email",
+    response_model=TokenResponse,
+    dependencies=[Depends(RateLimiter(requests=10, window=60))],
+)
+async def verify_email(
+    request: VerifyEmailRequest,
+    response: Response,
+    service: AuthService = Depends(get_auth_service),
+):
+    """Check the emailed code. On success the address is verified and the user is signed in."""
+    result = await service.verify_email(request.email, request.code)
     set_refresh_token_cookie(response, result["refresh_token"])
     return TokenResponse(access_token=result["access_token"], token_type=result["token_type"])
+
+
+@router.post(
+    "/resend-verification",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(RateLimiter(requests=5, window=60))],
+)
+async def resend_verification(
+    request: ResendVerificationRequest,
+    service: AuthService = Depends(get_auth_service),
+):
+    """Send a fresh code. Always 204, whether or not the address has an account."""
+    await service.resend_verification(request.email)
 
 
 @router.post(

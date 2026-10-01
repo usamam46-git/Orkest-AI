@@ -128,6 +128,13 @@ services:
       # which must be an authorized redirect URI on the OAuth client.
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      # Email verification at sign-up. Off by default so a fresh clone registers
+      # straight in. Set REQUIRE_EMAIL_VERIFICATION=true in infra/.env to try the
+      # code screen: with no RESEND_API_KEY the 6-digit code is printed in the API
+      # log (docker compose logs api | grep "DEV ONLY") instead of being mailed.
+      REQUIRE_EMAIL_VERIFICATION: ${REQUIRE_EMAIL_VERIFICATION:-false}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
       SENTRY_DSN: ${SENTRY_DSN:-}
     ports:
       - "${API_PORT:-8000}:8000"

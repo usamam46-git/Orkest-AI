@@ -178,6 +178,13 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_REDIRECT_URI: ${FRONTEND_URL}/api/v1/auth/google/callback
+      # Email verification at sign-up. ON in production, and not overridable to "off"
+      # by omission: the default is true. With no mail provider the API refuses to
+      # register anyone (503) rather than quietly skip the check. The sender and key
+      # are the same ones the contact form uses, so there is nothing new to set.
+      REQUIRE_EMAIL_VERIFICATION: ${REQUIRE_EMAIL_VERIFICATION:-true}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      EMAIL_FROM: ${CONTACT_FROM_EMAIL:-}
     healthcheck:
       # python, not curl — the base image is python:3.12-slim and has no curl.
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=4).status == 200 else 1)"]

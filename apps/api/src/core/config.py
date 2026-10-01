@@ -101,6 +101,24 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
+    # Transactional email (Resend) and email verification
+    #
+    # REQUIRE_EMAIL_VERIFICATION is the switch: when true, password sign-up issues no
+    # session until the address proves it can receive a 6-digit code. It is OFF by
+    # default so local development and the test suite need no mail provider, and ON
+    # in docker-compose.prod.yml. Turning it on without a working provider makes
+    # registration fail loudly (503) rather than silently skip the check — the same
+    # stance as the contact form.
+    # ------------------------------------------------------------------
+    REQUIRE_EMAIL_VERIFICATION: bool = Field(default=False)
+    RESEND_API_KEY: str = Field(default="")
+    EMAIL_FROM: str = Field(default="", description='e.g. "Orkest <contact@your-verified-domain>"')
+
+    @property
+    def email_enabled(self) -> bool:
+        return bool(self.RESEND_API_KEY and self.EMAIL_FROM)
+
+    # ------------------------------------------------------------------
     # Google sign-in (OAuth 2.0 authorization-code flow, server-side)
     #
     # Sign-in with Google is OFF unless BOTH the id and the secret are set; the

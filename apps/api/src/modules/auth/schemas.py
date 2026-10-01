@@ -56,3 +56,25 @@ class ProvidersResponse(BaseModel):
     """Which sign-in methods this deployment offers. Drives the login page's buttons."""
 
     google: bool
+
+
+class RegisterResponse(BaseModel):
+    """
+    Either a signed-in session (no verification required: `access_token` set) or a
+    request to verify (`verification_required` true, no token). The client branches
+    on `verification_required`; it never has to guess from a missing field.
+    """
+
+    access_token: str | None = None
+    token_type: str = "bearer"
+    verification_required: bool = False
+    email: str | None = None
+
+
+class VerifyEmailRequest(BaseModel):
+    email: EmailStr
+    code: str = Field(..., pattern=r"^\d{6}$", description="The 6-digit code from the email.")
+
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr

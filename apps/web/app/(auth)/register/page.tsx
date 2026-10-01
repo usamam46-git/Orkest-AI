@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { authApi } from "@/lib/api";
+import { EmailOtpForm } from "@/components/auth/email-otp-form";
 import { GoogleSignIn } from "@/components/auth/google-button";
 import { getApiErrorMessage } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
@@ -21,6 +22,8 @@ export default function RegisterPage() {
   const [organizationName, setOrganizationName] = React.useState("");
   const [isPending, setIsPending] = React.useState(false);
   const [serverError, setServerError] = React.useState<string | null>(null);
+  // Set when the API wants the emailed code before it will open a session.
+  const [pendingEmail, setPendingEmail] = React.useState<string | null>(null);
   const [submitted, setSubmitted] = React.useState(false);
 
   const errors = {
@@ -39,6 +42,11 @@ export default function RegisterPage() {
     setIsPending(true);
     try {
       const response = await authApi.register({ full_name: fullName.trim(), email, password, organization_name: organizationName.trim() });
+      if (response.verification_required || !response.access_token) {
+        // No session yet: the address has to prove it can receive mail first.
+        setPendingEmail(response.email ?? email);
+        return;
+      }
       setAccessToken(response.access_token);
       // Matches the login redirect — a new org lands on the dashboard, whose
       // empty states point at creating a first workflow.
@@ -48,6 +56,19 @@ export default function RegisterPage() {
     } finally {
       setIsPending(false);
     }
+  }
+
+  if (pendingEmail) {
+    return (
+      <EmailOtpForm
+        email={pendingEmail}
+        onBack={() => setPendingEmail(null)}
+        onVerified={(token) => {
+          setAccessToken(token);
+          router.replace("/dashboard");
+        }}
+      />
+    );
   }
 
   return (

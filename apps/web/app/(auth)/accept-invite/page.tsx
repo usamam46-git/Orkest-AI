@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Loader2, ShieldCheck, TriangleAlert } from "lucide-react";
 
+import { EmailOtpForm } from "@/components/auth/email-otp-form";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -88,6 +89,8 @@ function AcceptInviteInner() {
   const [fullName, setFullName] = React.useState("");
   const [password, setPassword] = React.useState("");
   const [error, setError] = React.useState<string | null>(null);
+  // Set when the API wants the emailed code before it will open a session.
+  const [pendingEmail, setPendingEmail] = React.useState<string | null>(null);
 
   const accept = useMutation({
     mutationFn: () => membersApi.acceptInvite(token),
@@ -104,6 +107,11 @@ function AcceptInviteInner() {
         invite_token: token,
       }),
     onSuccess: (response) => {
+      if (response.verification_required || !response.access_token) {
+        // An invite link is not proof of the mailbox, so invitees verify too.
+        setPendingEmail(response.email ?? preview.data!.email);
+        return;
+      }
       setAccessToken(response.access_token);
       router.replace("/dashboard");
     },
@@ -137,6 +145,19 @@ function AcceptInviteInner() {
   }
 
   const invite = preview.data!;
+
+  if (pendingEmail) {
+    return (
+      <EmailOtpForm
+        email={pendingEmail}
+        onBack={() => setPendingEmail(null)}
+        onVerified={(token) => {
+          setAccessToken(token);
+          router.replace("/dashboard");
+        }}
+      />
+    );
+  }
 
   return (
     <Card className="mx-auto w-full max-w-md bg-popover shadow-pop">

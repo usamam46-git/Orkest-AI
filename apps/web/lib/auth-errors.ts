@@ -1,3 +1,5 @@
+import axios from "axios";
+
 /**
  * Messages for the `?error=` slug the API's Google callback puts on `/login`.
  *
@@ -23,4 +25,14 @@ const GOOGLE_ERRORS: Record<string, string> = {
 export function authErrorMessage(slug: string | null | undefined): string | null {
   if (!slug) return null;
   return Object.hasOwn(GOOGLE_ERRORS, slug) ? GOOGLE_ERRORS[slug] : null;
+}
+
+/**
+ * True when `POST /auth/login` refused a correct password because the address was
+ * never verified. The API answers 403 with the literal detail `email_not_verified`
+ * (and has already emailed a fresh code), and the login page turns that into the
+ * code screen instead of an error.
+ */
+export function isEmailNotVerified(error: unknown): boolean {
+  return axios.isAxiosError(error) && error.response?.status === 403 && error.response.data?.detail === "email_not_verified";
 }

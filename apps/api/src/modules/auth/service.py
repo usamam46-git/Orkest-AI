@@ -1,7 +1,10 @@
 import hashlib
 import hmac
+import json
+import logging
 import secrets
 import uuid
+from datetime import UTC, datetime
 
 import redis.asyncio as aioredis
 from fastapi import HTTPException, status
@@ -14,6 +17,7 @@ from src.core.cache import (
     invalidate_permissions_cache,
 )
 from src.core.config import settings
+from src.core.email import EmailError, send_email
 from src.core.security import (
     create_access_token,
     create_refresh_token,
@@ -23,12 +27,24 @@ from src.core.security import (
     verify_password,
 )
 from src.modules.auth import google_oauth
+from src.modules.auth.email_templates import verification_email
 from src.modules.auth.models import OrgMembership, Role, User
 from src.modules.auth.schemas import LoginRequest, RegisterRequest, TokenResponse
 from src.modules.organizations.models import Organization
 from src.modules.workspaces.models import Workspace
 
+logger = logging.getLogger(__name__)
+
 GOOGLE_STATE_TTL_SECONDS = 600
+
+# Email verification. Ten minutes is long enough to switch to a mail app and back and
+# short enough that a code sitting in an inbox is not a standing credential; five
+# wrong guesses burn it (a 6-digit code is only a million possibilities, so the
+# attempt cap — not the entropy — is what makes it safe); sixty seconds between
+# sends stops the endpoint being used to mail-bomb an address.
+VERIFICATION_TTL_SECONDS = 600
+VERIFICATION_COOLDOWN_SECONDS = 60
+VERIFICATION_MAX_ATTEMPTS = 5
 
 
 class GoogleSignInError(Exception):
@@ -48,14 +64,53 @@ class AuthService:
         self.db = db
         self.redis = redis
 
-    async def register(self, req: RegisterRequest) -> TokenResponse:
+    async def register(self, req: RegisterRequest) -> dict:
         """
         Creates a User, Organization, Workspace, and OrgMembership (Owner role).
-        Returns a token pair scoped to the new org.
+
+        Returns a token pair scoped to the new org — or, when email verification is
+        required, `{"verification_required": True, "email": ...}` and NO tokens: the
+        account exists but cannot sign in until the emailed code is entered.
         """
+        require_verification = settings.REQUIRE_EMAIL_VERIFICATION
+        if require_verification and not settings.email_enabled and not settings.DEBUG:
+            # Fail loudly rather than skip the check: a deployment that thinks it
+            # verifies addresses and does not is worse than one that says so.
+            # (DEBUG is the one exception — see `_send_verification_code`.)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Sign-up is temporarily unavailable.",
+            )
+
         # Check if user already exists
-        existing = await self.db.execute(select(User).where(User.email == req.email))
-        if existing.scalar_one_or_none():
+        existing = (await self.db.execute(select(User).where(User.email == req.email))).scalar_one_or_none()
+        if existing:
+            # An UNVERIFIED password account is not an owned address, it is an
+            # abandoned (or hostile) attempt. If it blocked re-registration, anyone
+            # could squat a victim's address with a password of their own and lock
+            # the real owner out. So the new attempt takes the account over — new
+            # password, new name, the same org renamed — and sends a fresh code.
+            # Only whoever can read that mailbox can then complete it.
+            if require_verification and existing.email_verified_at is None and not req.invite_token:
+                existing.hashed_password = get_password_hash(req.password)
+                existing.full_name = req.full_name
+                owned = (
+                    (
+                        await self.db.execute(
+                            select(Organization)
+                            .join(OrgMembership, OrgMembership.organization_id == Organization.id)
+                            .where(OrgMembership.user_id == existing.id)
+                            .order_by(OrgMembership.created_at)
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                if owned is not None and req.organization_name:
+                    owned.name = req.organization_name
+                await self.db.commit()
+                await self._send_verification_code(existing)
+                return {"verification_required": True, "email": existing.email}
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Email already registered",
@@ -75,6 +130,10 @@ class AuthService:
             email=req.email,
             hashed_password=get_password_hash(req.password),
             full_name=req.full_name,
+            # Without the requirement there is nothing to check, so the address is
+            # recorded as verified — otherwise turning it on later would lock out
+            # every account made while it was off.
+            email_verified_at=None if require_verification else datetime.now(UTC),
         )
         self.db.add(user)
         await self.db.flush()
@@ -87,6 +146,9 @@ class AuthService:
         # created: the invitee is joining somewhere that already has both, and
         # minting a throwaway org for them is the outcome invitations exist to
         # avoid.
+        #
+        # The invite link is NOT proof of the mailbox (the inviter copies it out of
+        # the UI by hand), so it goes through the same code check as everyone else.
         if req.invite_token:
             from src.modules.organizations.service import MemberService
 
@@ -99,14 +161,145 @@ class AuthService:
             membership.user_id = user.id
             membership.status = "active"
             await self.db.commit()
+            if require_verification:
+                await self._send_verification_code(user)
+                return {"verification_required": True, "email": user.email}
             return await self._generate_token_response(user.id, org.id)
 
         # 2-4. Organization, default workspace and the Owner membership
         org = await self._provision_org(user.id, req.organization_name, owner_role_obj.id)
         await self.db.commit()
 
+        if require_verification:
+            await self._send_verification_code(user)
+            return {"verification_required": True, "email": user.email}
+
         # Generate tokens
         return await self._generate_token_response(user.id, org.id)
+
+    # ------------------------------------------------------------------
+    # Email verification
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _verification_key(email: str) -> str:
+        return f"email_verify:{hashlib.sha256(email.lower().encode()).hexdigest()}"
+
+    @staticmethod
+    def _verification_cooldown_key(email: str) -> str:
+        return f"email_verify_cd:{hashlib.sha256(email.lower().encode()).hexdigest()}"
+
+    @staticmethod
+    def _code_mac(email: str, code: str) -> str:
+        """Keyed hash of the code. Redis holds this, never the code itself."""
+        return hmac.new(settings.SECRET_KEY.encode(), f"{email.lower()}:{code}".encode(), hashlib.sha256).hexdigest()
+
+    async def _send_verification_code(self, user: User) -> bool:
+        """
+        Mint a code, store its hash, and email it. Returns False if skipped for the
+        cooldown (a code was sent under a minute ago — the person already has one).
+        Raises 503 if the mail provider refuses; the stored code is discarded so a
+        message that never arrived cannot be guessed at.
+        """
+        acquired = await self.redis.set(self._verification_cooldown_key(user.email), "1", ex=VERIFICATION_COOLDOWN_SECONDS, nx=True)
+        if not acquired:
+            return False
+
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        key = self._verification_key(user.email)
+        await self.redis.set(
+            key,
+            json.dumps({"mac": self._code_mac(user.email, code), "attempts": 0}),
+            ex=VERIFICATION_TTL_SECONDS,
+        )
+
+        if not settings.email_enabled and settings.DEBUG:
+            # Development only, and only with no provider configured: log the code so
+            # the whole sign-up flow can be driven locally without mailing anyone.
+            # Production runs with DEBUG=false, where this branch is unreachable and
+            # an unconfigured provider is a 503 instead.
+            logger.warning("DEV ONLY - email verification code for %s is %s", user.email, code)
+            return True
+
+        subject, html, text = verification_email(
+            code=code,
+            full_name=user.full_name,
+            base_url=settings.FRONTEND_URL,
+            expires_minutes=VERIFICATION_TTL_SECONDS // 60,
+        )
+        try:
+            await send_email(to=user.email, subject=subject, html=html, text=text)
+        except EmailError as exc:
+            logger.error("verification email to a user failed: %s", exc)
+            await self.redis.delete(key, self._verification_cooldown_key(user.email))
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="We could not send the verification email. Please try again in a moment.",
+            ) from exc
+        return True
+
+    async def verify_email(self, email: str, code: str) -> dict:
+        """
+        Check a code and, if right, mark the address verified and sign the user in.
+
+        Every failure is the same 400 — unknown address, no code outstanding, wrong
+        code, burnt code — so the endpoint cannot be used to ask whether an address
+        has an account or a pending sign-up.
+        """
+        invalid = HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="That code is invalid or has expired.")
+
+        key = self._verification_key(email)
+        raw = await self.redis.get(key)
+        if not raw:
+            raise invalid
+        data = json.loads(raw)
+
+        if data["attempts"] >= VERIFICATION_MAX_ATTEMPTS:
+            await self.redis.delete(key)
+            raise invalid
+
+        if not hmac.compare_digest(data["mac"], self._code_mac(email, code)):
+            data["attempts"] += 1
+            await self.redis.set(key, json.dumps(data), keepttl=True)
+            raise invalid
+
+        user = (await self.db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+        if user is None:
+            raise invalid
+
+        await self.redis.delete(key)
+        if user.email_verified_at is None:
+            user.email_verified_at = datetime.now(UTC)
+
+        membership = (
+            (
+                await self.db.execute(
+                    select(OrgMembership).where(OrgMembership.user_id == user.id, OrgMembership.status == "active").order_by(OrgMembership.created_at)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        await self.db.commit()
+        if membership is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User does not belong to any active organizations")
+        return await self._generate_token_response(user.id, membership.organization_id)
+
+    async def resend_verification(self, email: str) -> None:
+        """
+        Send a fresh code if this address has an unverified account. Always returns
+        quietly: a different response for "no such account" would turn the endpoint
+        into an address-existence oracle. Failures are logged, not surfaced.
+        """
+        if not settings.REQUIRE_EMAIL_VERIFICATION:
+            return
+        user = (await self.db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+        if user is None or user.email_verified_at is not None:
+            return
+        try:
+            await self._send_verification_code(user)
+        except HTTPException:
+            logger.warning("resend of a verification code failed")
 
     async def _provision_org(self, user_id: uuid.UUID, org_name: str, owner_role_id: uuid.UUID) -> Organization:
         """
@@ -146,6 +339,14 @@ class AuthService:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid email or password",
             )
+
+        # Password was right but the address was never proven. Send a fresh code (the
+        # cooldown makes a second attempt a no-op) and tell the client to show the
+        # code screen. Only reachable with the correct password, so it reveals
+        # nothing to someone who does not already hold the account.
+        if settings.REQUIRE_EMAIL_VERIFICATION and user.email_verified_at is None:
+            await self._send_verification_code(user)
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="email_not_verified")
 
         if not user.memberships:
             raise HTTPException(
@@ -237,6 +438,13 @@ class AuthService:
                     # The address is already tied to a DIFFERENT Google account.
                     raise GoogleSignInError("conflict")
                 user.google_sub = profile.sub
+                if user.email_verified_at is None:
+                    # Google just proved the address, which is what verification is.
+                    # But the account was UNVERIFIED until now, so whoever created it
+                    # may not be the owner of this mailbox: drop its password, or a
+                    # squatter who pre-registered the address keeps a working login.
+                    user.hashed_password = None
+                    user.email_verified_at = datetime.now(UTC)
                 if not user.avatar_url and profile.picture:
                     user.avatar_url = profile.picture
             else:
@@ -250,6 +458,7 @@ class AuthService:
                     full_name=display_name,
                     avatar_url=profile.picture,
                     google_sub=profile.sub,
+                    email_verified_at=datetime.now(UTC),
                 )
                 self.db.add(user)
                 await self.db.flush()

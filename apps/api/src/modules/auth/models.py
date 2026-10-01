@@ -5,8 +5,9 @@ Vol. 2 §3.1 — Identity & Tenancy
 """
 
 import uuid
+from datetime import datetime
 
-from sqlalchemy import Boolean, ForeignKey, Text, UniqueConstraint
+from sqlalchemy import TIMESTAMP, Boolean, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -37,6 +38,15 @@ class User(UUIDMixin, TimestampMixin, Base):
     )
     full_name: Mapped[str] = mapped_column(Text, nullable=False)
     avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+        comment=(
+            "When this address proved it can receive mail (a 6-digit code, or Google "
+            "reporting it verified). Null = unverified: password sign-in is refused. "
+            "Every user that existed before the column was added is backfilled."
+        ),
+    )
     google_sub: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,

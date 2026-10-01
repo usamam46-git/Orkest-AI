@@ -8,8 +8,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { authApi } from "@/lib/api";
+import { EmailOtpForm } from "@/components/auth/email-otp-form";
 import { GoogleSignIn } from "@/components/auth/google-button";
-import { authErrorMessage } from "@/lib/auth-errors";
+import { authErrorMessage, isEmailNotVerified } from "@/lib/auth-errors";
 import { getApiErrorMessage } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
 
@@ -23,6 +24,8 @@ function LoginForm() {
   const [isPending, setIsPending] = React.useState(false);
   const [serverError, setServerError] = React.useState<string | null>(null);
   const [submitted, setSubmitted] = React.useState(false);
+  // Set when the password was right but the address was never verified.
+  const [unverifiedEmail, setUnverifiedEmail] = React.useState<string | null>(null);
 
   const errors = {
     email: submitted && !email.includes("@") ? "Enter a valid email address." : null,
@@ -43,10 +46,28 @@ function LoginForm() {
       // on /workflows only because no home page existed before 2026-08-10.
       router.replace("/dashboard");
     } catch (error) {
+      if (isEmailNotVerified(error)) {
+        // The API has already mailed a fresh code; hand over to the code screen.
+        setUnverifiedEmail(email);
+        return;
+      }
       setServerError(getApiErrorMessage(error, "Invalid email or password"));
     } finally {
       setIsPending(false);
     }
+  }
+
+  if (unverifiedEmail) {
+    return (
+      <EmailOtpForm
+        email={unverifiedEmail}
+        onBack={() => setUnverifiedEmail(null)}
+        onVerified={(token) => {
+          setAccessToken(token);
+          router.replace("/dashboard");
+        }}
+      />
+    );
   }
 
   return (
