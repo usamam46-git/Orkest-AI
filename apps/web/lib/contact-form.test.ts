@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   EMPTY_CONTACT_FORM,
   TEAM_SIZES,
+  buildContactEmail,
   type ContactFormValues,
   hasErrors,
   isConsumerEmail,
@@ -83,5 +84,34 @@ describe("isConsumerEmail", () => {
   it("does not throw on a malformed address", () => {
     expect(isConsumerEmail("nope")).toBe(false);
     expect(isConsumerEmail("")).toBe(false);
+  });
+});
+
+describe("buildContactEmail", () => {
+  const base = { ...EMPTY_CONTACT_FORM, name: "Ada Lovelace", email: "ada@acme.test", teamSize: "11-50", message: "We close the books by hand." };
+
+  it("puts the visitor in Reply-To so answering the email answers the lead", () => {
+    expect(buildContactEmail(base).replyTo).toBe("ada@acme.test");
+  });
+
+  it("strips line breaks from anything that reaches a header", () => {
+    const email = buildContactEmail({ ...base, name: "Ada\r\nBcc: attacker@evil.test", company: "Acme\nCo" });
+    expect(email.subject).not.toMatch(/[\r\n]/);
+    expect(email.replyTo).not.toMatch(/[\r\n]/);
+  });
+
+  it("shows the human label for the team size and keeps the message intact", () => {
+    const email = buildContactEmail(base);
+    expect(email.text).toContain("Team size: 11–50 people");
+    expect(email.text.endsWith("We close the books by hand.")).toBe(true);
+  });
+
+  it("omits the company from the subject when none was given", () => {
+    expect(buildContactEmail(base).subject).toBe("Orkest enquiry: Ada Lovelace");
+    expect(buildContactEmail({ ...base, company: "Acme" }).subject).toBe("Orkest enquiry: Ada Lovelace (Acme)");
+  });
+
+  it("caps the subject length", () => {
+    expect(buildContactEmail({ ...base, name: "x".repeat(500) }).subject.length).toBeLessThanOrEqual(200);
   });
 });

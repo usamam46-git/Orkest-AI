@@ -97,3 +97,32 @@ export function validateContactForm(values: ContactFormValues): ContactFormError
 export function hasErrors(errors: ContactFormErrors): boolean {
   return Object.keys(errors).length > 0;
 }
+
+/**
+ * The email Resend is asked to send for one submission.
+ *
+ * Plain text only, never HTML: every field is visitor-controlled, and an HTML
+ * body would make "name" an injection vector into the inbox it lands in.
+ * Header-bearing fields (the subject) have all line breaks stripped — a CR/LF
+ * smuggled into a subject is the classic way to add headers to a message.
+ */
+export function buildContactEmail(values: ContactFormValues): { subject: string; text: string; replyTo: string } {
+  const oneLine = (value: string) => value.replace(/[\r\n]+/g, " ").trim();
+  const name = oneLine(values.name);
+  const company = oneLine(values.company);
+  const teamSize = TEAM_SIZES.find((size) => size.value === values.teamSize)?.label ?? values.teamSize;
+
+  return {
+    subject: `Orkest enquiry: ${name}${company ? ` (${company})` : ""}`.slice(0, 200),
+    // Reply-To is the visitor, so answering the email answers the lead.
+    replyTo: oneLine(values.email),
+    text: [
+      `Name: ${name}`,
+      `Email: ${oneLine(values.email)}`,
+      `Company: ${company || "—"}`,
+      `Team size: ${teamSize}`,
+      "",
+      values.message.trim(),
+    ].join("\n"),
+  };
+}

@@ -170,7 +170,14 @@ services:
       - --forwarded-allow-ips
       - "*"
     depends_on: *app-depends
-    environment: *api-env
+    environment:
+      <<: *api-env
+      # Sign in with Google — on the API only, not the workers, which never serve a
+      # login and have no use for the secret. Off unless BOTH id and secret are set.
+      # The redirect URI is the one registered on the OAuth client in Google Cloud.
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${FRONTEND_URL}/api/v1/auth/google/callback
     healthcheck:
       # python, not curl — the base image is python:3.12-slim and has no curl.
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=4).status == 200 else 1)"]
@@ -202,6 +209,11 @@ services:
       # Server-side only. Without it app/api/contact/route.ts returns 503 by
       # design, rather than silently dropping submissions.
       CONTACT_WEBHOOK_URL: ${CONTACT_WEBHOOK_URL:-}
+      # Email delivery through Resend — preferred over the webhook when all three
+      # are set. The sender must be on a domain verified in Resend.
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      CONTACT_FROM_EMAIL: ${CONTACT_FROM_EMAIL:-}
+      CONTACT_TO_EMAIL: ${CONTACT_TO_EMAIL:-}
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
