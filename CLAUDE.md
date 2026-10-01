@@ -1263,6 +1263,27 @@ verified via a full read-only orientation pass — see note below.)
   only** because a literal match is different evidence from semantic similarity,
   and the tsquery is **OR not AND** or a natural question matches nothing.
   **598 backend tests** (588 + 10).
+- **First real deployment landed 2026-10-01/02 — a single AWS EC2 box** (Vol. 6
+  §4), driven by `infra/aws-provision.sh` (AWS CLI, idempotent; Terraform was
+  deliberately not used for a one-box deployment). Runs `docker-compose.prod.yml`
+  + `docker-compose.aws.yml` behind nginx with a Let's Encrypt certificate; the
+  nightly `pg_dump` to S3 is scheduled and a manual run was verified. Read
+  `infra/DEPLOY-AWS.md`. Three things found only by deploying, none visible locally:
+  - **A free-plan AWS account refuses `t4g.medium`** (`not eligible for Free Tier`).
+    The 4 GB type it allows is `c7i-flex.large` (x86), ~2x the planned cost, so the
+    credit runway is ~3 months rather than 6. The scripts take `INSTANCE_TYPE` /
+    `UBUNTU_ARCH`; `ec2-user-data.sh` now installs the AWS CLI matching the CPU.
+  - **`minio/minio` can no longer be pulled** (Docker Hub and quay both refuse) —
+    the production stack could not have started. Production now uses **real S3**
+    through the instance IAM role; `core/storage.py` picks S3 when `MINIO_ENDPOINT`
+    and both keys are EMPTY, and local dev is unchanged (still MinIO, verified by a
+    live round trip). The dev `docker-compose.yml` still says `minio/minio:latest`:
+    it works only while that image is cached locally, so a fresh clone cannot start
+    it. Not yet fixed.
+  - **`backup.sh`'s 20 KB floor rejected a valid dump** of a fresh database (~8 KB);
+    now 5 KB, overridable via `MIN_BYTES`.
+  **Not verified:** the full browser loop on the public origin (register, upload a
+  PDF into S3, run the demo workflows) and a real restore from a backup.
 - Next: **actually deploy** (the stack is written and locally verified but has
   never run on a VPS — see `infra/DEPLOY.md`), then **scheduled off-host
   database backups**, which is the largest gap the moment real data exists.

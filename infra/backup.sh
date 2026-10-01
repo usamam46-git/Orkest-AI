@@ -7,7 +7,7 @@
 #   ./backup.sh            # dump, verify, upload
 #
 # What it protects: the database (workflows, runs, audit trail, chunks and the
-# ENCRYPTED credentials). What it does not: MinIO's original uploaded files
+# ENCRYPTED credentials). What it does not: the uploaded files in the documents S3 bucket
 # (re-uploadable; chunks already live in the DB) and INTEGRATION_ENCRYPTION_KEY,
 # which must be stored somewhere this bucket is not — without it the restored
 # credentials are permanently undecryptable.
@@ -28,7 +28,7 @@ command -v aws >/dev/null || { echo "aws CLI not installed" >&2; exit 1; }
 
 COMPOSE=(docker compose -f docker-compose.prod.yml -f docker-compose.aws.yml --env-file .env.prod)
 # Below this a dump is an empty schema or an error message, not this database.
-MIN_BYTES=20000
+MIN_BYTES="${MIN_BYTES:-5000}"   # an empty-schema dump is ~8 KB; a failed one is under 1 KB
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 # GNU mktemp requires the X's at the END of the template (BSD tolerates a suffix).

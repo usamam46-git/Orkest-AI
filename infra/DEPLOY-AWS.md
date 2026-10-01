@@ -13,35 +13,50 @@ Vol. 6 §4's deployment model is a single Linux VPS running the full Compose
 stack. EC2 *is* that VPS — no managed services, no rearchitecting.
 
 What is different is size. Vol. 6 §4 specifies 8 vCPU / 32 GB; this targets a
-**`t4g.medium` (2 vCPU Graviton, 4 GB)**, because this deployment is for
-learning and portfolio use and is funded by AWS credits. That is a deliberate
+**`c7i-flex.large` (2 vCPU x86, 4 GB)**, because this deployment is for
+learning and portfolio use and is funded by AWS credits. (It was planned as a
+`t4g.medium`, but a free-plan account refuses that type at launch — see §1. The
+`c7i-flex` family is the cheapest 4 GB type such an account may use.) That is a deliberate
 deviation, and it lives in exactly one file:
 [`docker-compose.aws.yml`](docker-compose.aws.yml), a sizing override layered
 on top of `docker-compose.prod.yml`. Its header says what it changes and — more
 importantly — the two things it deliberately does *not* change (the three
 worker containers stay three containers; Postgres `max_connections` goes *up*).
 
-**Graviton (arm64) is safe for this stack.** Every backend dependency in
-`apps/api/pyproject.toml` ships aarch64 wheels, both Dockerfiles build from
-multi-arch bases, and `pgvector/pgvector:pg16`, `minio/minio`, `redis`, `nginx`
-and `certbot` all publish arm64 images. Nothing needs to be built for amd64.
+**Object storage is real S3, not MinIO.** MinIO stopped publishing container
+images (Docker Hub and quay both refuse the pull), so the production stack has
+no MinIO service at all. `core/storage.py` selects S3 when `MINIO_ENDPOINT` and
+both keys are empty and lets boto3 use the instance's IAM role — there is no
+storage secret on the box. Local development is unchanged and still runs MinIO.
+
+**Architecture.** The stack is multi-arch, so x86 (this box) and Graviton both
+work; `aws-provision.sh` takes `INSTANCE_TYPE` and `UBUNTU_ARCH` to switch.
+
+**Fast path.** `infra/aws-provision.sh` performs §1–§3 and the AWS half of §10 in
+one idempotent run (budget, key pair, security group, both buckets, IAM role,
+instance, Elastic IP): `ALERT_EMAIL=you@example.com ./aws-provision.sh`. The
+sections below are what it does, and the manual console route if you prefer it.
+The A record in §4 is still yours to create — it needs the printed Elastic IP.
 
 ## 1. Cost — set this up before launching anything
 
 | item | per month (us-east-1) |
 |---|---|
-| `t4g.medium` on-demand, 730 h | ~$24.53 |
+| `c7i-flex.large` on-demand, 730 h | ~$62 (verify against current pricing) |
 | 40 GB gp3 EBS | ~$3.20 |
 | public IPv4 address (Elastic IP) | ~$3.65 |
-| **running** | **~$31.40** → ~6 months of $200 |
+| **running** | **~$69** → roughly 3 months of $200 |
 | **stopped** (EBS + IPv4 still bill) | ~$6.85 |
+
+`t4g.medium` (~$24.53) would be ~$31/month running, but is not available on the
+free plan.
 
 Data transfer out is negligible at demo traffic. **OpenAI spend is not covered
 by AWS credits** — it is the budget model in `Docs/15-day-build-plan.md`, and
 it is separate.
 
 **First action in the account: create a budget.** Billing and Cost Management →
-Budgets → *Create budget* → Cost budget, monthly, **$35**:
+Budgets → *Create budget* → Cost budget, monthly, **$75**:
 
 - alert at **80% of actual** and **100% of forecasted**, to your email;
 - under *Advanced options*, make sure **credits are not netted out** of the
@@ -59,9 +74,10 @@ your actual expiry date. Two consequences:
 - Stopping the instance to "stretch" the credits can save credits that expire
   unused. At ~$31/mo the budget and the window line up — leaving it running is
   the reasonable default.
-- Free-plan accounts can be restricted from some services and instance types.
-  If the launch in §2 is refused for the instance type, that is why — not a
-  mistake in these steps.
+- Free-plan accounts are restricted to instance types flagged free-tier
+  eligible. `t4g.medium` is refused with `InvalidParameterCombination … not
+  eligible for Free Tier`; list what is allowed with
+  `aws ec2 describe-instance-types --filters Name=free-tier-eligible,Values=true`.
 
 **What actually burns credits unexpectedly is rarely the instance.** It's the
 thing launched to try something and then forgotten: a NAT Gateway (~$32/mo
@@ -75,8 +91,8 @@ EC2 → *Launch instance*:
 | setting | value |
 |---|---|
 | Name | `orkest` |
-| AMI | **Ubuntu Server 24.04 LTS**, architecture **64-bit (Arm)** |
-| Instance type | **`t4g.medium`** |
+| AMI | **Ubuntu Server 24.04 LTS**, architecture **64-bit (x86)** |
+| Instance type | **`c7i-flex.large`** |
 | Key pair | create one (ed25519); keep the `.pem` — it is the only way in |
 | Storage | **40 GiB gp3** (the default 8 GiB fills on the first build) |
 | Security group | new, rules below |
@@ -90,7 +106,7 @@ Security group, **inbound**:
 | 80 | `0.0.0.0/0` | Let's Encrypt HTTP-01 challenge, and the redirect to HTTPS |
 | 443 | `0.0.0.0/0` | the application |
 
-Nothing else. Postgres, Redis and MinIO publish no ports in
+Nothing else. Postgres and Redis publish no ports in
 `docker-compose.prod.yml`, and **the security group is the only thing that keeps
 that true if someone publishes one later.** `ec2-user-data.sh` enables `ufw` with
 the same three ports, but ufw does not protect container ports: Docker writes its
@@ -98,20 +114,11 @@ iptables rules ahead of ufw's, so a port published by Compose is open to the
 internet whatever `ufw status` reports. ufw guards host-level listeners; the
 security group guards everything.
 
-### CPU credits: Unlimited for the first build, Standard after
+### CPU credits
 
-T4g instances launch in **Unlimited** CPU-credit mode by default. The baseline
-for a `t4g.medium` is 20% per vCPU; in Unlimited mode, sustained use above that
-is billed as surplus (about $0.04 per vCPU-hour). A few image builds cost cents.
-**A crash-looping container pinning both cores for three weeks costs tens of
-dollars**, and that's the failure that goes unnoticed on a demo box nobody watches.
-
-- Leave it on Unlimited through the first `dc build` (§6), so the build isn't
-  throttled to baseline.
-- Once the stack is up and healthy, switch to **Standard**: Instance → Actions →
-  Instance settings → *Change credit specification*. Under Standard, the same
-  runaway gets throttled instead of billed — the stack gets slow, and slow is
-  noticeable.
+`c7i-flex` is not a burstable family, so there is no CPU-credit mode to manage.
+(On a `t4g`/`t3` box the default Unlimited mode bills sustained overage; switch it
+to Standard once the first build is done.)
 
 ## 3. Elastic IP
 
@@ -229,8 +236,6 @@ exit 137 means the swapfile didn't come up — go back to §5.
 Then continue with `DEPLOY.md` §4's `dc logs migrate` and onward, through §6's
 seven verification checks. They all apply unchanged.
 
-**After the stack is healthy, go back to §2 and switch CPU credits to Standard.**
-
 ## 7. Running on 4 GB
 
 ```sh
@@ -264,8 +269,8 @@ add up to 4 GB.
 
 ## 8. Stopping and starting
 
-**Stop** ≠ **terminate**. Stopping keeps the EBS volume (the database, MinIO's
-objects, the certificates) and the Elastic IP; it stops compute billing and
+**Stop** ≠ **terminate**. Stopping keeps the EBS volume (the database and
+the certificates; uploaded documents are in S3, not on the volume) and the Elastic IP; it stops compute billing and
 leaves ~$6.85/mo. **Terminate deletes the root volume — the database with it.**
 
 After a start, every service has `restart: unless-stopped`, so Docker brings the
@@ -280,12 +285,7 @@ dc ps     # all healthy; migrate shows Exited (0), which is correct
 Listed so the next reader knows these were considered, not missed:
 
 - **Backups** are set up in §10 below.
-- **S3 instead of MinIO.** Not the configuration-only change it sounds like.
-  `core/storage.py` builds its client from static `MINIO_ACCESS_KEY` /
-  `MINIO_SECRET_KEY` and always passes `endpoint_url`, so an IAM instance role
-  would need a code change (make both optional and omit `endpoint_url` for AWS).
-  MinIO on the box is fine at this scale; this is the natural first AWS-native
-  swap if it stops being fine.
+- **S3 instead of MinIO** is done — see §0.
 - **RDS / ElastiCache.** ~$25/mo more between them, which roughly halves the
   credit runway, and it gives up the self-contained pgvector-in-Compose story.
   Not worth it at this scale.
@@ -302,11 +302,13 @@ and exits non-zero on any failure. It needs the AWS CLI (installed by
 `ec2-user-data.sh`; on an instance launched before that change run the three
 `curl`/`unzip`/`install` lines from its §2b by hand).
 
-**S3 bucket.** Private, default encryption on, public access blocked. Add a
+**S3 bucket.** Private, default encryption on, public access blocked, and a
 lifecycle rule expiring objects after 30 days, otherwise nightly dumps grow
-forever.
+forever. `aws-provision.sh` creates this and the documents bucket.
 
-**IAM role.** Create a role for EC2 with only:
+**IAM role.** The instance role (created by `aws-provision.sh`) can only put
+objects under `db/` in the backup bucket, plus list/get/put/delete on the
+documents bucket. For the backup bucket that is:
 
 ```json
 {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject",
@@ -337,5 +339,9 @@ gunzip -c orkest-aap_db-<stamp>.sql.gz | dc exec -T postgres psql -U "$POSTGRES_
 
 **Store `INTEGRATION_ENCRYPTION_KEY` outside this bucket** (a password manager).
 The dump holds credentials encrypted under it; without the key a restore brings
-back rows nobody can decrypt. MinIO's original uploaded files are not backed up —
-their chunks are in the dump, and documents can be re-uploaded.
+back rows nobody can decrypt. Uploaded documents live in the documents S3 bucket
+and are not in the dump; their chunks are. That bucket has no lifecycle rule and
+no versioning — enable versioning if accidental deletion matters.
+
+`backup.sh` refuses dumps under 5,000 bytes (`MIN_BYTES` overrides). A fresh
+migrated database dumps to ~8 KB; a failed dump is under 1 KB.

@@ -4,7 +4,7 @@
 # Paste the whole file into the launch wizard's "Advanced details → User data"
 # field. It runs once, as root, on first boot. See infra/DEPLOY-AWS.md §2.
 #
-# Targets Ubuntu Server 24.04 LTS (arm64) on a t4g.medium. Ubuntu rather than
+# Targets Ubuntu Server 24.04 LTS on a 4 GB box (c7i-flex.large, x86; arm64 also works). Ubuntu rather than
 # Amazon Linux because infra/DEPLOY.md §0 is already written against ufw and
 # apt, and one set of instructions is better than two.
 #

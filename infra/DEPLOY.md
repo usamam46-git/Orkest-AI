@@ -51,8 +51,12 @@ openssl rand -hex 32     # SECRET_KEY
 openssl rand -hex 32     # JWT_SECRET_KEY   (a different value)
 openssl rand -base64 32  # INTEGRATION_ENCRYPTION_KEY
 openssl rand -hex 24     # POSTGRES_PASSWORD
-openssl rand -hex 24     # MINIO_ACCESS_KEY / MINIO_SECRET_KEY
 ```
+
+On AWS there are no storage keys to generate: uploads go to S3 through the
+instance's IAM role (`S3_DOCUMENTS_BUCKET`, `AWS_REGION`). A non-AWS VPS has no
+role to use; it needs either static S3 credentials or a self-hosted
+S3-compatible store, neither of which this compose file provides.
 
 There are no defaults. `dc config` fails and names any variable you missed —
 that is deliberate, and the reason is in `.env.prod.example`.

@@ -16,9 +16,9 @@
 # Vol. 6 §4 sizes the single-VPS deployment at 8 vCPU / 32 GB, and
 # docker-compose.prod.yml is written to that: 16 Celery child processes
 # (-c 4 + -c 8 + -c 4) plus three parents, which is roughly 4 GB of Python
-# before Postgres, MinIO or Next.js get any.
+# before Postgres or Next.js get any.
 #
-# The target here is a t4g.medium — 2 vCPU Graviton, 4 GB — because this is a
+# The target here is a 4 GB box (c7i-flex.large — 2 vCPU x86 —) because this is a
 # portfolio/learning deployment funded by AWS credits, and 4 GB is what buys a
 # runway long enough to matter. That is a DELIBERATE deviation from the
 # blueprint's sizing, and it is the only deviation: nothing below adds,
