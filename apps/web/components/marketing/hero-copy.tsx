@@ -3,95 +3,156 @@
 import * as React from "react";
 import { useRouter } from "next/navigation";
 import { useLenis } from "lenis/react";
-import { KeyRound, Lock, ScrollText } from "lucide-react";
 
+import ScrambleText from "@/components/ui/scramble-text";
 import { InteractiveHoverButton } from "@/components/ui/interactive-hover-button";
+import { usePrefersReducedMotion } from "@/hooks/use-media-query";
+import { cn } from "@/lib/utils";
 
 /**
  * The hero copy, over the office.
  *
- * ## What changed and why
+ * ## Redesigned 2026-10-02: left-aligned, sequenced, and shorter
  *
- * This used to sit on a sky-blue gradient with an aurora shader behind it and a
- * collage of floating UI cards beneath it. The product owner's call was to open
- * the page **in the office instead** — a real desk with the company's documents
- * on it, with the whole scroll narrative starting from there. The sky, the
- * aurora and the collage are gone; `sky-backdrop.tsx`, `aurora-canvas.tsx` and
- * `hero-collage.tsx` went with them.
+ * It used to be a centred stack — eyebrow, two-line headline, a long paragraph, a
+ * row of three icon bullets, two pills — every element centred on the room. That
+ * is the shape of a thousand landing pages, and the page read as templated before
+ * a word of it was read. Three changes, none of them to the photograph:
  *
- * The words did not change. They are the page's conversion and they were
- * already right; only the surface behind them did.
+ * - **Left-aligned, on the content column.** The plate's right third is a busy
+ *   bookcase and its left two thirds is a calm wall with a bright window, so the
+ *   block sits where the photograph is quiet and the bookcase is left alone. It
+ *   aligns to the same `max-w-6xl` column as every section below it.
+ * - **The icon row is gone.** "Row-level tenant isolation / append-only audit
+ *   trail / bring your own key" is a feature trio, and the platform tiles further
+ *   down already make each of those claims with evidence. Repeating them here as
+ *   three icons was the single most template-shaped thing on the screen.
+ * - **The headline resolves instead of appearing.** Each line scrambles into
+ *   place (`ScrambleText`), staggered, and the sentence and buttons rise in behind
+ *   it. Slow enough to be seen, but everything is on screen by ~2.1s: a call to
+ *   action that waits five seconds for an animation is a conversion cost.
  *
- * ## Neither button is lime
+ * ## What must not break
  *
- * The buttons sit on the walnut desk, and a saturated yellow-green on warm
- * timber reads as neon no matter how far it is deepened — it was tuned twice
- * and rejected twice. The primary is ink with white text, the secondary is
- * paper with a hairline. Lime survives where it still works: the nav pill and
- * the accent rule on every document.
+ * - **The headline stays in the server-rendered HTML.** `ScrambleText` renders the
+ *   full text in an `sr-only` span, so the H1's text is in the initial markup and
+ *   a screen reader reads it once, whole. Each line also keeps an invisible copy
+ *   of itself as a spacer, so the block's height is final from the first paint and
+ *   nothing below it moves while letters resolve.
+ * - **It must never strand a blank hero.** `use-scramble` runs on
+ *   `requestAnimationFrame`, which does not tick in a background tab — the same
+ *   hazard that made GSAP `from(opacity: 0)` blank this page once. If the first
+ *   line has not finished within `FALLBACK_MS`, every line is shown as plain text.
+ *   Reduced-motion visitors get plain text and no sequence at all.
+ * - **No GSAP here.** The reveals are CSS transitions driven by a step counter, so
+ *   they cannot leave an element at opacity 0 the way an unguarded `gsap.from`
+ *   does.
+ * - **The block stops above the table edge** (`PLATE_DESK_EDGE_NDC`, 72% of
+ *   frame). The wood carries the paperwork and must stay clean; the buttons are
+ *   the lowest element and are opaque, so documents can come right up under them.
+ * - **It scrolls away AND fades on its own** — see `core-scene.tsx`; none of that
+ *   is touched here.
  *
- * ## The type is nearly opaque ink, and that is a contrast requirement
+ * ## Neither button is lime, and the type is near-opaque ink
  *
- * This copy has been retuned twice for two different backgrounds. It began as
- * white with a text-shadow over a blue gradient. It then became low-opacity ink
- * over a modelled near-white wall, where `text-mk-ink/45` on a flat #f2f2f5
- * surface is an elegant 7:1 and the docstring here claimed it needed "no
- * shadow, no scrim and no envelope".
- *
- * **That claim is void over a photograph, and the failure mode is worth knowing:
- * translucent ink has a contrast ceiling that no background can lift.** Ink at
- * 45% reaches only ~3.4:1 even on pure white, so on the plate the second
- * headline line measured 1.0:1 — literally invisible in its worst patch — and no
- * amount of scrim could have fixed it. `text-mk-ink-soft` (#5c5f66) had the
- * mirror problem: a mid-grey always finds a mid-tone in a photograph to vanish
- * into, and it measured 1.0:1 at *every* wash strength tested.
- *
- * So the tones here are near-opaque (80/70/90/85%), which restores the visual
- * hierarchy through weight rather than through transparency, and the plate
- * carries a measured 45% wash for the rest. Both halves were needed; neither
- * worked alone. The measured ratios are recorded in `apps/web/CLAUDE.md` — if
- * you change a tone here or the wash there, re-measure per text line, because
- * per element box flatters the numbers by including leading and ragged edges.
- *
- * The "Watch a run" button keeps the `quiet` tone rather than `ink`: two solid
- * heavy pills side by side compete, and the secondary should not be shouting.
- *
- * ## The block clears the table edge
- *
- * The tabletop starts at 72% of frame (`PLATE_DESK_EDGE_NDC`). Everything above
- * that is the blurred room and reads normally; the wood below carries the
- * paperwork and must stay clean, so nothing here is allowed to reach it. The
- * buttons are the lowest element and stop above the edge — unlike the previous
- * plate, they no longer sit *on* the desk, because this table is a working
- * surface with twenty documents on it rather than an empty band.
- *
- * ## The buttons are the lowest element, on purpose
- *
- * The proof facts used to sit beneath the calls to action, which made small
- * grey text the lowest thing on the screen — and text is what cannot survive
- * having paper behind it. Reserving space for it pushed the desk's documents
- * out of the entire lower centre and left a hole in the middle of the shot.
- * The buttons are opaque, so documents can come right up under them; the facts
- * moved above them and the room got its centre back.
- *
- * ## It scrolls away on its own
- *
- * There is no fade logic here. The copy is positioned in the first viewport of
- * the scene's tall scroll container while the canvas behind it is `sticky`, so
- * scrolling lifts the words off the top of the screen while the room stays. The
- * scene's own captions take over from `core-scene.tsx` once the documents start
- * to rise.
+ * Both unchanged and for the same reasons. Lime on warm timber reads as neon, so
+ * the primary is ink with white text and the secondary is paper with a hairline.
+ * Translucent ink has a contrast ceiling no background can lift (45% ink reaches
+ * ~3.4:1 even on pure white, and measured 1.0:1 over the plate), so the tones are
+ * 80/70/90% and the plate carries a measured 45% wash. **Moving the block off the
+ * bookcase changes which pixels sit behind the words, so the figures recorded in
+ * `apps/web/CLAUDE.md` describe the old position and must be re-measured** (worst
+ * 8px patch per text line, per `Range.getClientRects()`).
  */
 
-const PROOF = [
-  { icon: Lock, label: "Row-level tenant isolation" },
-  { icon: ScrollText, label: "Append-only audit trail" },
-  { icon: KeyRound, label: "Bring your own model key" },
-] as const;
+/** The headline, one entry per visual line. Each resolves on its own beat. */
+const HEADLINE = ["Automation that", "knows when to ask"] as const;
+
+/** Milliseconds from mount. The whole sequence is visible by `cta`. */
+const BEATS = { eyebrow: 150, line1: 450, line2: 1000, body: 1800, cta: 2150 } as const;
+
+/** If the first line has not finished by here the tab is not animating; show plain text. */
+const FALLBACK_MS = 4500;
+
+/** How fast each line scrambles. Lower is slower; `ScrambleText` divides by 100. */
+const SCRAMBLE_SPEED = 55;
+
+/**
+ * 0 = nothing, 1 = eyebrow, 2 = line one starts, 3 = line two starts, 4 = sentence,
+ * 5 = buttons. Reduced motion jumps straight to the end.
+ */
+function useSequence(reducedMotion: boolean): number {
+  const [step, setStep] = React.useState(0);
+
+  React.useEffect(() => {
+    if (reducedMotion) return;
+    const beats = [BEATS.eyebrow, BEATS.line1, BEATS.line2, BEATS.body, BEATS.cta];
+    const timers = beats.map((ms, index) => window.setTimeout(() => setStep(index + 1), ms));
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
+  }, [reducedMotion]);
+
+  // Derived, not stored: reduced motion needs no sequence at all.
+  return reducedMotion ? 5 : step;
+}
+
+/** A reveal: fades and rises into place when `shown`. Layout space is reserved either way. */
+const reveal = (shown: boolean) =>
+  cn(
+    "transition-[opacity,transform] duration-[900ms] ease-out motion-reduce:transition-none",
+    shown ? "translate-y-0 opacity-100" : "translate-y-3 opacity-0",
+  );
+
+function HeadlineLine({
+  text,
+  active,
+  plain,
+  className,
+  onComplete,
+}: {
+  text: string;
+  active: boolean;
+  plain: boolean;
+  className?: string;
+  onComplete?: () => void;
+}) {
+  if (plain) {
+    return <span className={cn("block", className)}>{text}</span>;
+  }
+
+  return (
+    <span className={cn("relative block", className)}>
+      {/* Reserves the line's final box so the block never reflows as letters resolve. */}
+      <span aria-hidden className="invisible block">
+        {text}
+      </span>
+      <span className="absolute inset-0 block">
+        {active ? (
+          <ScrambleText text={text} speed={SCRAMBLE_SPEED} onComplete={onComplete} />
+        ) : (
+          // Not started yet: still give assistive tech and the server HTML the words.
+          <span className="sr-only">{text}</span>
+        )}
+      </span>
+    </span>
+  );
+}
 
 export function HeroCopy() {
   const router = useRouter();
   const lenis = useLenis();
+  const reducedMotion = usePrefersReducedMotion();
+  const step = useSequence(reducedMotion);
+
+  const firstLineDone = React.useRef(false);
+  const [plain, setPlain] = React.useState(false);
+
+  React.useEffect(() => {
+    if (reducedMotion) return;
+    const timer = window.setTimeout(() => {
+      if (!firstLineDone.current) setPlain(true);
+    }, FALLBACK_MS);
+    return () => window.clearTimeout(timer);
+  }, [reducedMotion]);
 
   /**
    * "Watch a run" jumps to the run scene.
@@ -117,42 +178,66 @@ export function HeroCopy() {
   };
 
   return (
-    <div className="mx-auto max-w-3xl px-5 text-center">
-      <p className="mk-eyebrow text-mk-ink/80">Workflow automation for ERP, HR and Finance</p>
+    <div className="mx-auto w-full max-w-6xl px-5">
+      {/* Without JS nothing advances the step counter, so the reveals would stay at
+          opacity 0. This keeps them visible. */}
+      <noscript>
+        <style>{"[data-hero-reveal]{opacity:1!important;transform:none!important}"}</style>
+      </noscript>
 
-      <h1 className="mk-display mt-4 text-[2.75rem] text-mk-ink sm:text-6xl lg:text-[4.25rem]">
-        <span className="block">Automation that knows</span>
-        <span className="block text-mk-ink/70">when to ask</span>
-      </h1>
+      <div className="max-w-[40rem] text-left">
+        <p
+          data-hero-reveal
+          className={cn("mk-eyebrow flex items-center gap-3 text-mk-ink/80", reveal(step >= 1))}
+        >
+          <span aria-hidden className="h-px w-8 bg-mk-ink/60" />
+          Workflow automation for ERP, HR and Finance
+        </p>
 
-      <p className="mx-auto mt-5 max-w-2xl text-[1.0625rem] leading-relaxed font-medium text-mk-ink/90 sm:text-[1.125rem]">
-        Orkest runs your back-office workflows end to end — reading documents, calling your systems,
-        closing the loop. Then it stops for a person before anything touches your ledger.
-      </p>
+        <h1 className="mk-display mt-5 text-[2.75rem] leading-[1.02] text-mk-ink sm:text-6xl lg:text-[4.5rem]">
+          <HeadlineLine
+            text={HEADLINE[0]}
+            active={step >= 2}
+            plain={plain || reducedMotion}
+            onComplete={() => {
+              firstLineDone.current = true;
+            }}
+          />
+          <HeadlineLine
+            text={HEADLINE[1]}
+            active={step >= 3}
+            plain={plain || reducedMotion}
+            className="text-mk-ink/70"
+          />
+        </h1>
 
-      <ul className="mt-6 flex flex-wrap items-center justify-center gap-x-6 gap-y-2.5">
-        {PROOF.map((item) => (
-          <li
-            key={item.label}
-            className="flex items-center gap-1.5 text-[0.8125rem] text-mk-ink/85"
-          >
-            <item.icon className="size-3.5 text-mk-lime-deep" aria-hidden />
-            {item.label}
-          </li>
-        ))}
-      </ul>
+        <p
+          data-hero-reveal
+          className={cn(
+            "mt-6 max-w-[30rem] text-[1.0625rem] leading-relaxed font-medium text-mk-ink/90 sm:text-[1.125rem]",
+            reveal(step >= 4),
+          )}
+        >
+          Orkest runs your back-office workflows end to end, then stops for a person before
+          anything touches your ledger.
+        </p>
 
-      <div className="pointer-events-auto mt-7 flex flex-wrap items-center justify-center gap-3">
-        <InteractiveHoverButton
-          text="Start building"
-          tone="solid"
-          onClick={() => router.push("/register")}
-        />
-        <InteractiveHoverButton
-          text="Watch a run"
-          tone="quiet"
-          onClick={() => scrollToRun()}
-        />
+        <div
+          data-hero-reveal
+          className={cn(
+            "mt-8 flex flex-wrap items-center gap-3",
+            reveal(step >= 5),
+            // The wrapper above is pointer-events-none; only enable the buttons once visible.
+            step >= 5 ? "pointer-events-auto" : "pointer-events-none",
+          )}
+        >
+          <InteractiveHoverButton
+            text="Start building"
+            tone="solid"
+            onClick={() => router.push("/register")}
+          />
+          <InteractiveHoverButton text="Watch a run" tone="quiet" onClick={() => scrollToRun()} />
+        </div>
       </div>
     </div>
   );

@@ -1173,23 +1173,28 @@ bookcase. Two independent failures had to be fixed together:
    sharp region and veil the documents. It scales about the same anchor, so the
    stop stays welded to the edge under the push-in.
 
-Measured on the shipped page at 1600×776, worst 8px patch **per text line**
-(`Range.getClientRects()`, vertically inset 18% for ascender slack — per element
-box flatters the numbers by including leading and ragged right edges):
+**Re-measured 2026-10-02 after the hero moved to the left** (centred stack → left
+column on the `max-w-6xl` content edge; see `hero-copy.tsx`). Same method —
+worst 8px patch per text line, `Range.getClientRects()` inset 18% — at 1440×717,
+using the plate mapped `object-cover` under the 45% wash:
 
 | Line | Ratio | Needs |
 |---|---|---|
-| Eyebrow, 11px | 4.75:1 | 4.5 |
-| Headline line 1, 68px | 6.22:1 | 3.0 (large) |
-| Headline line 2, 68px | 4.08:1 | 3.0 (large) |
-| Subhead, 18px | 4.59:1 | 4.5 |
-| Proof row, 13px | 5.66:1 | 4.5 |
+| Eyebrow, 11px | 5.32:1 | 4.5 |
+| Headline line 1, 72px | 6.69:1 | 3.0 (large) |
+| Headline line 2, 72px (`ink/70`) | 4.10:1 | 3.0 (large) |
+| Subhead, 18px | 6.25:1 | 4.5 |
 
-Every worst patch lands at x≈1000 — the dark bookcase edge. That is the spot to
-check first. **Do not eyeball this**: composite the plate with the wash into a
-canvas, resolve the computed colour through a 1×1 canvas (`getComputedStyle`
-returns `oklab()` here, and naively regexing its numbers reads the lightness as
-the red channel and flatters every ratio by ~10%), then sample per line.
+The icon row that used to be a fifth line (5.66:1) was deleted, not measured.
+Moving off the bookcase did not hurt: the old worst patches sat at x≈1000 on the
+dark shelf edge, and the block now ends at x≈800. Two caveats on this table: it
+models the plate as plain `object-cover` and ignores the push-in scale, and it
+was taken with the headline in its plain-text fallback (the animation does not
+run in this automation's hidden tab). Line two is the tightest and the one to
+recheck first if the wash, the tones or the photograph change.
+
+The table that stood here before (1600×776, centred) is superseded:
+eyebrow 4.75, headline 6.22 / 4.08, subhead 4.59, proof row 5.66.
 
 **The CTAs no longer sit on the desk.** That was a deliberate touch when the desk
 was an empty band; this table is a working surface with twenty documents on it,
