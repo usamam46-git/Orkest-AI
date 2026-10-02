@@ -50,29 +50,41 @@ from src.modules.workflows.repository import WorkflowRepository
 logger = logging.getLogger(__name__)
 
 
-def _strictly_downstream(node_key: str, edges: list[Any]) -> set[str]:
+def _nodes_before_stop(nodes: list[Any], edges: list[Any], stop: str | None) -> set[str]:
     """
-    Every node reachable FROM `node_key`, excluding `node_key` itself.
+    Conservatively reachable nodes, including the stop but not traversing it.
 
-    Used by the Test-step mutating guard to work out what a stop point excludes.
-    Bounded by the visited set, so a draft with a cycle terminates — the guard has
-    to work on graphs that would fail `validate_graph_structure`, because a test
-    run is exactly what someone reaches for before a graph is publishable.
+    The compiler enters a start node and routes conditions through their
+    predecessors: conditions produce no worker event and cannot stop a test.
+    Explore every branch without evaluating predicates. A descendant of the
+    stop may still execute via another branch, including after another approval
+    is resumed. Considering all starts also errs safely on incomplete drafts.
     """
-    downstream: set[str] = set()
-    queue = [node_key]
+    node_types = {node.node_key: node.node_type for node in nodes}
+    all_keys = set(node_types)
+    starts = [node.node_key for node in nodes if node.node_type == "start"]
+    if stop is None or stop not in node_types or node_types[stop] == "condition" or not starts or len(node_types) != len(nodes):
+        return all_keys
+
+    successors: dict[str, set[str]] = {}
+    for edge in edges:
+        if edge.source_node_key not in all_keys or edge.target_node_key not in all_keys:
+            # An incomplete draft offers no reliable proof that a write is skipped.
+            return all_keys
+        successors.setdefault(edge.source_node_key, set()).add(edge.target_node_key)
+
+    reachable: set[str] = set()
+    queue = starts
     head = 0
     while head < len(queue):
         current = queue[head]
         head += 1
-        for edge in edges:
-            if edge.source_node_key != current or edge.target_node_key in downstream:
-                continue
-            if edge.target_node_key == node_key:
-                continue
-            downstream.add(edge.target_node_key)
-            queue.append(edge.target_node_key)
-    return downstream
+        if current in reachable:
+            continue
+        reachable.add(current)
+        if current != stop:
+            queue.extend(successors.get(current, ()))
+    return reachable
 
 
 #: How far a signed request's timestamp may be from server time before it is
@@ -323,12 +335,12 @@ class ExecutionService:
         until_node_key: str | None,
     ) -> set[str]:
         """
-        Mutating nodes that this test would actually reach.
+        Mutating nodes that this test might reach.
 
-        "Reach" is deliberately generous: every node EXCEPT those strictly
-        downstream of the stop node. Working out the true executed set would mean
-        evaluating the conditions, which needs the run that has not happened yet —
-        so the safe reading is that anything not provably skipped might run.
+        Follow every possible branch from the entry, cutting traversal only
+        after an executable stop node. A write is exempt only when no path can
+        reach it without passing through that stop. Routing-only conditions
+        cannot stop the worker, so selecting one exempts nothing.
 
         A node is mutating on the same terms `validate_mutating_approval` uses:
         a literal `is_mutating: true` in its config, or a `tool_id` pointing at a
@@ -338,10 +350,7 @@ class ExecutionService:
         from src.modules.tools.repository import ToolRepository
 
         nodes = list(version.nodes)
-        reachable = {node.node_key for node in nodes}
-        if until_node_key is not None:
-            downstream = _strictly_downstream(until_node_key, list(version.edges))
-            reachable -= downstream
+        reachable = _nodes_before_stop(nodes, list(version.edges), until_node_key)
 
         tool_ids = {str(node.config["tool_id"]) for node in nodes if isinstance(node.config, dict) and node.config.get("tool_id")}
         mutating_tool_ids: set[str] = set()

@@ -30,6 +30,7 @@ from src.db.database import async_session_maker
 from src.graphs.compiler import _instrument, initial_state_from_trigger
 from src.graphs.node_handlers import AgentNodeConfigError, agent_handler, node_key_of
 from src.modules.executions.models import NodeExecution, WorkflowRun
+from src.modules.executions.service import _nodes_before_stop
 from src.modules.workflows.models import WorkflowEdge, WorkflowNode, WorkflowVersion
 from src.workers.graph_tasks import _stream_graph
 from tests.test_workflows import create_workflow, create_workspace, register_and_get_token
@@ -463,7 +464,7 @@ async def test_stopping_before_a_writing_step_makes_the_test_allowed(client: Asy
         client,
         token,
         wf["id"],
-        [_n("start_1", "start"), _n("safe", "condition"), _n("post", "tool", _KNOWLEDGE_FREE_TOOL), _n("end_1", "end")],
+        [_n("start_1", "start"), _n("safe", "human_approval"), _n("post", "tool", _KNOWLEDGE_FREE_TOOL), _n("end_1", "end")],
         [_e("start_1", "safe"), _e("safe", "post"), _e("post", "end_1")],
     )
 
@@ -575,3 +576,237 @@ async def test_the_status_endpoint_omits_the_input_output_blobs(client: AsyncCli
     for row in body["node_executions"]:
         assert "input" not in row
         assert "output" not in row
+
+
+@pytest.mark.parametrize("registry_backed", [False, True], ids=["inline", "registry"])
+@pytest.mark.parametrize(
+    ("shape", "stop", "allow_mutating", "expected"),
+    [
+        ("bypass", "approval_1", False, 422),
+        ("bypass", "approval_1", True, 201),
+        ("linear", "approval_1", False, 201),
+        ("linear", "post", False, 422),
+        ("linear", "post", True, 201),
+        ("bypass", None, False, 422),
+        ("bypass", "check_amount", False, 422),
+        ("two_gates", "approval_1", False, 422),
+        ("two_gates", "approval_2", False, 422),
+    ],
+)
+async def test_test_guard_checks_every_possible_branch(client, celery_calls, registry_backed, shape, stop, allow_mutating, expected):
+    data = await register_and_get_token(client, "branchguard")
+    token = data["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    ws = await create_workspace(client, token)
+    wf = await create_workflow(client, token, ws["id"])
+    config = _KNOWLEDGE_FREE_TOOL
+    if registry_backed:
+        tool = await client.post(
+            "/api/v1/tools",
+            json={
+                "workspace_id": ws["id"],
+                "name": "guard_test_write",
+                "tool_type": "erp_connector",
+                "config": {"action": "create_journal_entry"},
+                "is_mutating": True,
+            },
+            headers=headers,
+        )
+        assert tool.status_code == 201, tool.text
+        # Explicit false must not suppress the registry's mutation flag.
+        config = {"tool_id": tool.json()["id"], "is_mutating": False}
+
+    nodes = [_n("start_1", "start"), _n("approval_1", "human_approval"), _n("post", "tool", config), _n("end_1", "end")]
+    edges = [_e("approval_1", "post"), _e("post", "end_1")]
+    if shape == "linear":
+        edges.append(_e("start_1", "approval_1"))
+    else:
+        nodes.append(_n("check_amount", "condition"))
+        edges.extend(
+            [
+                _e("start_1", "check_amount"),
+                {
+                    **_e("check_amount", "approval_1"),
+                    "condition": {
+                        "field": "trigger_payload.amount",
+                        "operator": "gt",
+                        "value": 10,
+                        "branch": "needs_approval",
+                    },
+                },
+            ]
+        )
+        other = "post"
+        if shape == "two_gates":
+            other = "approval_2"
+            nodes.append(_n(other, "human_approval"))
+            edges.append(_e(other, "post"))
+        edges.append({**_e("check_amount", other), "condition": {"branch": "otherwise"}})
+
+    version = await _draft_version(client, token, wf["id"], nodes, edges)
+    response = await client.post(
+        f"/api/v1/workflows/{wf['id']}/versions/{version['id']}/test-run",
+        json={"until_node_key": stop, "allow_mutating": allow_mutating, "trigger_payload": {"amount": 5}},
+        headers=headers,
+    )
+    assert response.status_code == expected, response.text
+    if expected == 422:
+        assert "post" in response.json()["detail"]
+        assert not celery_calls, "rejected tests must never be dispatched"
+        assert (await client.get("/api/v1/executions?include_test=true", headers=headers)).json() == []
+    else:
+        assert len(celery_calls) == 1
+
+
+@pytest.mark.parametrize("stop", ["approval_1", "check_amount"])
+@pytest.mark.parametrize("amount", [5, 20])
+async def test_worker_branch_and_condition_stop_semantics(client, stop, amount):
+    """A controlled auto-post branch really writes despite either stop selection."""
+    run_id, version, org_id = await _prepared_run(
+        client,
+        "branchruntime",
+        [
+            _n("start_1", "start"),
+            _n("check_amount", "condition"),
+            _n("approval_1", "human_approval"),
+            _n("post", "tool", _KNOWLEDGE_FREE_TOOL),
+            _n("end_1", "end"),
+        ],
+        [
+            _e("start_1", "check_amount"),
+            {
+                **_e("check_amount", "approval_1"),
+                "condition": {
+                    "field": "trigger_payload.amount",
+                    "operator": "gt",
+                    "value": 10,
+                    "branch": "needs_approval",
+                },
+            },
+            {**_e("check_amount", "post"), "condition": {"branch": "auto_post"}},
+            _e("approval_1", "post"),
+            _e("post", "end_1"),
+        ],
+        until_node_key=stop,
+    )
+    with patch("src.graphs.node_handlers._run_erp_connector", return_value={"posted": True}) as write:
+        await _stream_graph(
+            run_id,
+            version,
+            initial_state_from_trigger(organization_id=org_id, trigger_payload={"amount": amount}),
+            1,
+            org_id,
+            stop_after_node_key=stop,
+            allow_draft=True,
+        )
+    keys = [row.node_key for row in await _rows_for(run_id)]
+    assert "check_amount" not in keys, "routing-only nodes emit no stop event"
+    if amount == 5:
+        write.assert_called_once()
+        assert "post" in keys
+        assert (await _run_row(run_id)).status == "completed"
+    else:
+        write.assert_not_called()
+        assert (await _run_row(run_id)).current_node_key == "approval_1"
+
+
+async def test_worker_reliably_stops_before_linear_write(client):
+    run_id, version, org_id = await _prepared_run(
+        client,
+        "linearwrite",
+        [_n("start_1", "start"), _n("post", "tool", _KNOWLEDGE_FREE_TOOL), _n("end_1", "end")],
+        [_e("start_1", "post"), _e("post", "end_1")],
+        until_node_key="start_1",
+    )
+    with patch("src.graphs.node_handlers._run_erp_connector") as write:
+        await _stream_graph(
+            run_id,
+            version,
+            initial_state_from_trigger(organization_id=org_id),
+            1,
+            org_id,
+            stop_after_node_key="start_1",
+            allow_draft=True,
+        )
+    write.assert_not_called()
+    assert [row.node_key for row in await _rows_for(run_id)] == ["start_1"]
+    assert (await _run_row(run_id)).status == "completed"
+
+
+@pytest.mark.parametrize("malformation", ["cycle", "no_start", "dangling", "duplicate", "multiple_starts"])
+def test_draft_reachability_is_conservative_and_cycle_safe(malformation):
+    nodes = [_node("start_1", "start"), _node("stop", "human_approval"), _node("post", "tool", _KNOWLEDGE_FREE_TOOL)]
+    edges = [_edge("start_1", "stop"), _edge("stop", "post")]
+    if malformation == "cycle":
+        nodes.append(_node("loop", "condition"))
+        edges.extend([_edge("start_1", "loop"), _edge("loop", "loop"), _edge("loop", "post")])
+    elif malformation == "no_start":
+        nodes[0].node_type = "tool"
+    elif malformation == "dangling":
+        edges.append(_edge("missing", "post"))
+    elif malformation == "duplicate":
+        nodes.append(_node("stop", "tool"))
+    else:
+        nodes.append(_node("start_2", "start"))
+        edges.append(_edge("start_2", "post"))
+    assert "post" in _nodes_before_stop(nodes, edges, "stop")
+
+
+@pytest.mark.parametrize("stop", ["approval_1", "approval_2"])
+async def test_approval_resume_only_honors_the_gate_actually_selected_as_stop(client, stop):
+    from langgraph.types import Command
+
+    run_id, version, org_id = await _prepared_run(
+        client,
+        "resumestop",
+        [
+            _n("start_1", "start"),
+            _n("route", "condition"),
+            _n("approval_1", "human_approval"),
+            _n("approval_2", "human_approval"),
+            _n("post", "tool", _KNOWLEDGE_FREE_TOOL),
+            _n("end_1", "end"),
+        ],
+        [
+            _e("start_1", "route"),
+            {
+                **_e("route", "approval_1"),
+                "condition": {
+                    "field": "trigger_payload.amount",
+                    "operator": "gt",
+                    "value": 10,
+                },
+            },
+            _e("route", "approval_2"),
+            _e("approval_1", "post"),
+            _e("approval_2", "post"),
+            _e("post", "end_1"),
+        ],
+        until_node_key=stop,
+    )
+    with patch("src.graphs.node_handlers._run_erp_connector", return_value={"posted": True}) as write:
+        await _stream_graph(
+            run_id,
+            version,
+            initial_state_from_trigger(organization_id=org_id, trigger_payload={"amount": 5}),
+            1,
+            org_id,
+            stop_after_node_key=stop,
+            allow_draft=True,
+        )
+        write.assert_not_called()
+        assert (await _run_row(run_id)).current_node_key == "approval_2"
+        await _stream_graph(
+            run_id,
+            version,
+            Command(resume={"approved": True}),
+            1,
+            org_id,
+            stop_after_node_key=stop,
+            allow_draft=True,
+        )
+        if stop == "approval_1":
+            write.assert_called_once()
+        else:
+            write.assert_not_called()
+    assert (await _run_row(run_id)).status == "completed"

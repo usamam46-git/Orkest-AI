@@ -1334,11 +1334,12 @@ before touching `_stream_graph` or the compiler.
   author fires while wiring a node up — `include_test=true` brings them back.
 - **A mutating node in the executed prefix is a 422 naming it**, unless the
   request carries `allow_mutating`. A test that posts a real journal entry is not
-  a test. "Reachable" is read generously — everything except what is strictly
-  downstream of the stop node — because the true executed set depends on
-  conditions that need the run that has not happened yet.
-  `_strictly_downstream` terminates on a cyclic draft, deliberately: a test run
-  is exactly what someone reaches for **before** a graph is publishable.
+  a test. `_nodes_before_stop` explores every branch from the start, including
+  the selected stop but cutting traversal after it. A descendant reachable by
+  bypassing the stop remains checked, including through another approval gate.
+  Conditions are routing-only and emit no worker event, so choosing one as the
+  stop exempts no writes. Missing starts, duplicate keys and dangling edges
+  fall back to checking all nodes; visited nodes bound cyclic draft traversal.
 - **`test_until_node_key` is read off the run row, not passed as a task
   argument.** A Celery signature change would strand any job already queued under
   the old one. It survives a resume, so approving a test cannot let it run past
